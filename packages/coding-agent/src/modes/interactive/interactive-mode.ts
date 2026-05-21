@@ -673,9 +673,13 @@ export class InteractiveMode {
 
 		// Add header with keybindings from config (unless silenced)
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
-			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
-
-			// Build startup instructions using keybinding hint helpers
+			const d4cAscii = `██████╗  ██╗  ██╗  ██████╗
+██╔══██╗██║  ██║ ██╔════╝
+██║  ██║███████║ ██║     
+██║  ██║╚════██║ ██║     
+██████╔╝     ██║ ╚██████╗
+╚═════╝      ╚═╝  ╚═════╝`;
+			const logo = theme.bold(theme.fg("accent", d4cAscii)) + theme.fg("dim", `\n\nv${this.version}`);
 			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
 
 			const expandedInstructions = [
@@ -706,17 +710,9 @@ export class InteractiveMode {
 				rawKeyHint("!", "bash"),
 				hint("app.tools.expand", "more"),
 			].join(theme.fg("muted", " · "));
-			const compactOnboarding = theme.fg(
-				"dim",
-				`Press ${keyText("app.tools.expand")} to show full startup help and loaded resources.`,
-			);
-			const onboarding = theme.fg(
-				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
-			);
 			this.builtInHeader = new ExpandableText(
-				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
-				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
+				() => `${logo}\n${compactInstructions}`,
+				() => `${logo}\n${expandedInstructions}`,
 				this.getStartupExpansionState(),
 				1,
 				0,
@@ -2664,6 +2660,29 @@ export class InteractiveMode {
 			if (text === "/resume") {
 				this.showSessionSelector();
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/plan" || text.startsWith("/plan ")) {
+				this.editor.setText("");
+				const request = text === "/plan" ? "" : text.slice(6).trim();
+				if (!request) {
+					this.showWarning("Usage: /plan <request>");
+					return;
+				}
+				if (this.session.isStreaming) {
+					this.showWarning("Agent is busy. Wait for it to finish.");
+					return;
+				}
+				await this.handlePlanCommand(request);
+				return;
+			}
+			if (text === "/build") {
+				this.editor.setText("");
+				if (this.session.isStreaming) {
+					this.showWarning("Agent is busy. Wait for it to finish.");
+					return;
+				}
+				await this.handleBuildCommand();
 				return;
 			}
 			if (text === "/quit") {
@@ -5142,6 +5161,67 @@ export class InteractiveMode {
 			dismissReloadBox(previousEditor as Component);
 			this.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	private async handlePlanCommand(request: string): Promise<void> {
+		const planPrompt = `You are in PLAN mode. Analyze the following request and create a detailed, step-by-step build plan.
+
+RULES:
+- Do NOT write any code or make any technical implementation
+- Use the ask_user_question tool to ask clarifying questions about requirements, preferences, and constraints
+- After gathering enough information, output a structured plan with numbered todo items (##1, ##2, ##3...) with clear descriptions
+- Each todo item must be a self-contained task that can be executed independently
+
+User request: ${request}`;
+
+		await this.session.sendUserMessage(planPrompt);
+	}
+
+	private async handleBuildCommand(): Promise<void> {
+		const messages = this.session.messages;
+		let planText = "";
+
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role === "assistant") {
+				const text =
+					typeof msg.content === "string"
+						? msg.content
+						: (msg.content?.map((c) => ("text" in c ? c.text : "")).join("\n") ?? "");
+				if (/##\d/.test(text)) {
+					planText = text;
+					break;
+				}
+			}
+		}
+
+		if (!planText) {
+			this.showWarning("No plan found. Use /plan first.");
+			return;
+		}
+
+		const todoRegex = /##(\d+)\s*[:.)]\s*(.+?)(?=\n##|\n*$)/g;
+		const todos: string[] = [];
+		for (const m of planText.matchAll(todoRegex)) {
+			todos.push(m[2].trim());
+		}
+
+		if (todos.length === 0) {
+			this.showWarning("No todo items found in plan.");
+			return;
+		}
+
+		this.showStatus(`Executing ${todos.length} todo(s) from plan...`);
+
+		for (let i = 0; i < todos.length; i++) {
+			const todo = todos[i];
+			this.showStatus(
+				`Building todo #${i + 1}/${todos.length}: ${todo.slice(0, 60)}${todo.length > 60 ? "..." : ""}`,
+			);
+			await this.session.sendUserMessage(`Build: ${todo}`);
+		}
+
+		this.showStatus("Build complete.");
 	}
 
 	private async handleExportCommand(text: string): Promise<void> {

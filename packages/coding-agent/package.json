@@ -4,10 +4,11 @@
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"type": "module",
 	"piConfig": {
+		"name": "d4c",
 		"configDir": ".pi"
 	},
 	"bin": {
-		"pi": "dist/cli.js"
+		"d4c": "dist/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
