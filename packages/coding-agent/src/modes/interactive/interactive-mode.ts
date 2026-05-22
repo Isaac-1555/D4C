@@ -4852,7 +4852,8 @@ export class InteractiveMode {
 
 RULES:
 - Do NOT write any code or make any technical implementation
-- Use the ask_user_question tool to ask clarifying questions about requirements, preferences, and constraints
+- Ask clarifying questions within the chat itself about requirements, preferences, and constraints
+- Add it to the to-do list, if you won't do it by yourself
 - After gathering enough information, output a structured plan with numbered todo items (##1, ##2, ##3...) with clear descriptions
 - Each todo item must be a self-contained task that can be executed independently
 
