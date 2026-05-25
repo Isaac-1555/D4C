@@ -1,57 +1,47 @@
-<p align="center">
-  <a href="https://pi.dev">
-    <img alt="pi logo" src="https://pi.dev/logo-auto.svg" width="128">
-  </a>
-</p>
-<p align="center">
-  <a href="https://discord.com/invite/3cU7Bz4UPx"><img alt="Discord" src="https://img.shields.io/badge/discord-community-5865F2?style=flat-square&logo=discord&logoColor=white" /></a>
-</p>
-<p align="center">
-  <a href="https://pi.dev">pi.dev</a> domain graciously donated by
-  <br /><br />
-  <a href="https://exe.dev"><img src="packages/coding-agent/docs/images/exy.png" alt="Exy mascot" width="48" /><br />exe.dev</a>
-</p>
+# D4C — Personal Coding Agent
 
-> New issues and PRs from new contributors are auto-closed by default. Maintainers review auto-closed issues daily. See [CONTRIBUTING.md](CONTRIBUTING.md).
+D4C is a personal coding agent I built by cloning the [pi coding agent](https://github.com/earendil-works/pi-mono) and making core changes that make it mine and personalized for my coding preferences and workflow.
 
----
+## Quick Start
 
-# Pi Agent Harness Mono Repo
+```bash
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+export ANTHROPIC_API_KEY=sk-ant-...
+d4c
+```
 
-This is the home of the pi agent harness project including our self extensible coding agent.
+The model has access to `read`, `write`, `edit`, and `bash` tools by default.
 
-* **[@earendil-works/pi-coding-agent](packages/coding-agent)**: Interactive coding agent CLI
-* **[@earendil-works/pi-agent-core](packages/agent)**: Agent runtime with tool calling and state management
-* **[@earendil-works/pi-ai](packages/ai)**: Unified multi-provider LLM API (OpenAI, Anthropic, Google, …)
+## Features
 
-To learn more about pi:
+- **30+ LLM providers** — Anthropic, OpenAI, Google, Bedrock, Groq, DeepSeek, Mistral, OpenRouter, xAI, Together AI, GitHub Copilot, and more. Use API keys or OAuth subscriptions. Switch models mid-session.
+- **Interactive TUI** — Custom terminal UI with markdown rendering, inline images, fuzzy file search, multi-line editor, full keyboard navigation.
+- **Session branching** — JSONL tree sessions. Branch, fork, clone, jump to any point with `/tree`. All history preserved in a single file.
+- **Extensions** — TypeScript modules adding custom tools, commands, event handlers, UI components.
+- **Skills** — On-demand capability packages following the [Agent Skills](https://agentskills.io) standard.
+- **Prompt templates** — Reusable markdown prompts with `{{variables}}`.
+- **Packages** — Bundle and share extensions, skills, prompts, themes via npm or git.
+- **Session compaction** — Automatic context window management.
+- **Multi-mode** — Interactive, print (`-p`), JSON, RPC, and SDK.
 
-* [Visit pi.dev](https://pi.dev), the project website with demos
-* [Read the documentation](https://pi.dev/docs/latest), but you can also ask the agent to explain itself
+## Philosophy
 
-## Share your OSS coding agent sessions
+D4C ships with opinionated built-ins that I need for my daily software engineering work:
 
-If you use pi or other coding agents for open source work, please share your sessions.
+- **MCP** — Context7 and Playwright MCP servers for documentation retrieval and browser automation.
+- **Plan mode** — Deterministic output from the agent before making any irreversible changes.
+- **TODO tool** — Track tasks during a session without confusing the model.
+- **websearch tool** — Real-time web access integrated into agent workflows.
 
-Public OSS session data helps improve coding agents with real-world tasks, tool use, failures, and fixes instead of toy benchmarks.
+Everything else is extensible. Add or replace capabilities via extensions, skills, and packages.
 
-For the full explanation, see [this post on X](https://x.com/badlogicgames/status/2037811643774652911).
-
-To publish sessions, use [`badlogic/pi-share-hf`](https://github.com/badlogic/pi-share-hf). Read its README.md for setup instructions. All you need is a Hugging Face account, the Hugging Face CLI, and `pi-share-hf`.
-
-You can also watch [this video](https://x.com/badlogicgames/status/2041151967695634619), where I show how I publish my `pi-mono` sessions.
-
-I regularly publish my own `pi-mono` work sessions here:
-
-- [badlogicgames/pi-mono on Hugging Face](https://huggingface.co/datasets/badlogicgames/pi-mono)
-
-## All Packages
+## Monorepo Packages
 
 | Package | Description |
 |---------|-------------|
-| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API (OpenAI, Anthropic, Google, etc.) |
+| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | D4C CLI |
+| **[@earendil-works/pi-ai](packages/ai)** | Unified multi-provider LLM API |
 | **[@earendil-works/pi-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
-| **[@earendil-works/pi-coding-agent](packages/coding-agent)** | Interactive coding agent CLI |
 | **[@earendil-works/pi-tui](packages/tui)** | Terminal UI library with differential rendering |
 
 For Slack/chat automation and workflows see [earendil-works/pi-chat](https://github.com/earendil-works/pi-chat).
@@ -69,15 +59,14 @@ If you need stronger boundaries, containerize or sandbox Pi. See [packages/codin
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
-
 ## Development
 
 ```bash
 npm install --ignore-scripts  # Install all dependencies without running lifecycle scripts
 npm run build        # Build all packages
 npm run check        # Lint, format, and type check
-./test.sh            # Run tests (skips LLM-dependent tests without API keys)
-./pi-test.sh         # Run pi from sources (can be run from any directory)
+./test.sh            # Run tests
+./pi-test.sh         # Run d4c from sources
 ```
 
 ## Supply-chain hardening
