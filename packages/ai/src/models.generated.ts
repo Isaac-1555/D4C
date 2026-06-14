@@ -8651,6 +8651,23 @@ export const MODELS = {
 			contextWindow: 1000000,
 			maxTokens: 65536,
 		} satisfies Model<"anthropic-messages">,
+		"qwen3.7-plus": {
+			id: "qwen3.7-plus",
+			name: "Qwen3.7 Plus",
+			api: "anthropic-messages",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 0.4,
+				output: 1.6,
+				cacheRead: 0.04,
+				cacheWrite: 0.5,
+			},
+			contextWindow: 262144,
+			maxTokens: 65536,
+		} satisfies Model<"anthropic-messages">,
 	},
 	"openrouter": {
 		"ai21/jamba-large-1.7": {
@@ -12401,6 +12418,23 @@ export const MODELS = {
 			contextWindow: 1000000,
 			maxTokens: 65536,
 		} satisfies Model<"openai-completions">,
+		"qwen/qwen3.7-plus": {
+			id: "qwen/qwen3.7-plus",
+			name: "Qwen: Qwen3.7 Plus",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 0.39999999999999997,
+				output: 1.5999999999999999,
+				cacheRead: 0.08,
+				cacheWrite: 0.5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 65536,
+		} satisfies Model<"openai-completions">,
 		"rekaai/reka-edge": {
 			id: "rekaai/reka-edge",
 			name: "Reka Edge",
@@ -12841,7 +12875,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 202752,
-			maxTokens: 16384,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5-turbo": {
 			id: "z-ai/glm-5-turbo",
@@ -12875,7 +12909,7 @@ export const MODELS = {
 				cacheWrite: 0,
 			},
 			contextWindow: 202752,
-			maxTokens: 131072,
+			maxTokens: 4096,
 		} satisfies Model<"openai-completions">,
 		"z-ai/glm-5v-turbo": {
 			id: "z-ai/glm-5v-turbo",
@@ -14152,7 +14186,7 @@ export const MODELS = {
 			provider: "vercel-ai-gateway",
 			baseUrl: "https://ai-gateway.vercel.sh",
 			reasoning: true,
-			input: ["text", "image"],
+			input: ["text"],
 			cost: {
 				input: 0.435,
 				output: 0.87,

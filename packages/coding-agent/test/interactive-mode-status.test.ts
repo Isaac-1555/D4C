@@ -19,6 +19,41 @@ function renderAll(container: Container, width = 120): string {
 	return container.children.flatMap((child) => child.render(width)).join("\n");
 }
 
+class TestFocusableComponent implements Component, Focusable {
+	focused = false;
+	inputs: string[] = [];
+	private readonly label: string;
+	private text = "";
+
+	constructor(label: string) {
+		this.label = label;
+	}
+
+	handleInput(data: string): void {
+		this.inputs.push(data);
+	}
+
+	getText(): string {
+		return this.text;
+	}
+
+	setText(text: string): void {
+		this.text = text;
+	}
+
+	render(): string[] {
+		return [this.label];
+	}
+
+	invalidate(): void {}
+}
+
+async function flushTui(tui: TUI, terminal: VirtualTerminal): Promise<void> {
+	tui.requestRender(true);
+	await Promise.resolve();
+	await terminal.waitForRender();
+}
+
 type ExtensionFixture = {
 	path: string;
 	sourceInfo?: SourceInfo;
