@@ -244,7 +244,7 @@ export class AgentSession {
 	private _pendingBashMessages: BashExecutionMessage[] = [];
 
 	readonly extensionRunner: any;
-	readonly bindExtensions: any;
+	readonly bindExtensions = async (_opts: any): Promise<void> => {};
 
 	private _resourceLoader: ResourceLoader;
 	private _customTools: ToolDefinition[];
