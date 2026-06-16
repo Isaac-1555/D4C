@@ -5,9 +5,9 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { AgentMessage, StreamFn } from "@earendil-works/pi-agent-core";
-import type { Model, SimpleStreamOptions } from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai";
+import type { AgentMessage, StreamFn } from "d4c-agent-core";
+import type { Model, SimpleStreamOptions } from "d4c-ai";
+import { completeSimple } from "d4c-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,

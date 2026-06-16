@@ -61,7 +61,7 @@ class KeyLogger implements Component {
 		return "legacy";
 	}
 
-	private fit(line: string, width: number): string {
+	private fitLine(line: string, width: number): string {
 		return truncateToWidth(line, width).padEnd(width);
 	}
 
@@ -70,14 +70,14 @@ class KeyLogger implements Component {
 
 		// Title
 		lines.push("=".repeat(width));
-		lines.push(this.fit("Key Code Tester - Press keys to see their codes (Ctrl+C to exit)", width));
-		lines.push(this.fit(`Protocol: ${this.protocolName()}`, width));
+		lines.push(this.fitLine("Key Code Tester - Press keys to see their codes (Ctrl+C to exit)", width));
+		lines.push(this.fitLine(`Protocol: ${this.protocolName()}`, width));
 		lines.push("=".repeat(width));
 		lines.push("");
 
 		// Log entries
 		for (const entry of this.log) {
-			lines.push(this.fit(entry, width));
+			lines.push(this.fitLine(entry, width));
 		}
 
 		// Fill remaining space
@@ -88,12 +88,12 @@ class KeyLogger implements Component {
 
 		// Footer
 		lines.push("=".repeat(width));
-		lines.push(this.fit("Test these:", width));
-		lines.push(this.fit("  - Shift + Enter (should show: \\x1b[13;2u with Kitty protocol)", width));
-		lines.push(this.fit("  - Alt/Option + Enter", width));
-		lines.push(this.fit("  - Option/Alt + Backspace", width));
-		lines.push(this.fit("  - Cmd/Ctrl + Backspace", width));
-		lines.push(this.fit("  - Regular Backspace", width));
+		lines.push(this.fitLine("Test these:", width));
+		lines.push(this.fitLine("  - Shift + Enter (should show: \\x1b[13;2u with Kitty protocol)", width));
+		lines.push(this.fitLine("  - Alt/Option + Enter", width));
+		lines.push(this.fitLine("  - Option/Alt + Backspace", width));
+		lines.push(this.fitLine("  - Cmd/Ctrl + Backspace", width));
+		lines.push(this.fitLine("  - Regular Backspace", width));
 		lines.push("=".repeat(width));
 
 		return lines;

@@ -68,8 +68,8 @@ export {
 	type WriteToolOptions,
 } from "./write.ts";
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ToolDefinition } from "../extensions/types.ts";
+import type { AgentTool } from "d4c-agent-core";
+import type { ToolDefinition } from "../tool-types.ts";
 import { type BashToolOptions, createBashTool, createBashToolDefinition } from "./bash.ts";
 import { createEditTool, createEditToolDefinition, type EditToolOptions } from "./edit.ts";
 import { createFindTool, createFindToolDefinition, type FindToolOptions } from "./find.ts";

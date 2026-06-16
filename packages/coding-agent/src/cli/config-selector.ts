@@ -2,9 +2,29 @@
  * TUI config selector for `pi config` command
  */
 
-import { ProcessTerminal, TUI } from "@earendil-works/pi-tui";
-import type { ResolvedPaths } from "../core/package-manager.ts";
+import { ProcessTerminal, TUI } from "d4c-tui";
 import type { SettingsManager } from "../core/settings-manager.ts";
+
+interface PathMetadata {
+	origin: "package" | "top-level";
+	source: string;
+	scope: "user" | "project" | "temporary";
+	baseDir?: string;
+}
+
+interface ResolvedResource {
+	path: string;
+	enabled: boolean;
+	metadata: PathMetadata;
+}
+
+interface ResolvedPaths {
+	extensions: ResolvedResource[];
+	skills: ResolvedResource[];
+	prompts: ResolvedResource[];
+	themes: ResolvedResource[];
+}
+
 import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.ts";
 import { initTheme, stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
 

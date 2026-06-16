@@ -6,7 +6,7 @@
  * - `pi --mode json "prompt"` - JSON event stream
  */
 
-import type { AssistantMessage, ImageContent } from "@earendil-works/pi-ai";
+import type { AssistantMessage, ImageContent } from "d4c-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -70,35 +70,6 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-		await session.bindExtensions({
-			mode: mode === "json" ? "json" : "print",
-			commandContextActions: {
-				waitForIdle: () => session.agent.waitForIdle(),
-				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
-				fork: async (entryId, forkOptions) => {
-					const result = await runtimeHost.fork(entryId, forkOptions);
-					return { cancelled: result.cancelled };
-				},
-				navigateTree: async (targetId, navigateOptions) => {
-					const result = await session.navigateTree(targetId, {
-						summarize: navigateOptions?.summarize,
-						customInstructions: navigateOptions?.customInstructions,
-						replaceInstructions: navigateOptions?.replaceInstructions,
-						label: navigateOptions?.label,
-					});
-					return { cancelled: result.cancelled };
-				},
-				switchSession: async (sessionPath, switchOptions) => {
-					return runtimeHost.switchSession(sessionPath, switchOptions);
-				},
-				reload: async () => {
-					await session.reload();
-				},
-			},
-			onError: (err) => {
-				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
-			},
-		});
 
 		unsubscribe?.();
 		unsubscribe = session.subscribe((event) => {

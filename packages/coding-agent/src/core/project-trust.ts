@@ -1,5 +1,4 @@
-import { emitProjectTrustEvent } from "./extensions/runner.ts";
-import type { LoadExtensionsResult, ProjectTrustContext } from "./extensions/types.ts";
+import type { ProjectTrustContext } from "./agent-session-runtime.ts";
 import type { DefaultProjectTrust } from "./settings-manager.ts";
 import {
 	getProjectTrustOptions,
@@ -15,9 +14,7 @@ export interface ResolveProjectTrustedOptions {
 	trustStore: ProjectTrustStore;
 	trustOverride?: boolean;
 	defaultProjectTrust?: DefaultProjectTrust;
-	extensionsResult?: LoadExtensionsResult;
 	projectTrustContext: ProjectTrustContext;
-	onExtensionError?: (message: string) => void;
 }
 
 function formatProjectTrustPrompt(cwd: string): string {
@@ -48,24 +45,6 @@ export async function resolveProjectTrusted(options: ResolveProjectTrustedOption
 	}
 	if (!hasTrustRequiringProjectResources(options.cwd)) {
 		return true;
-	}
-
-	if (options.extensionsResult) {
-		const { result, errors } = await emitProjectTrustEvent(
-			options.extensionsResult,
-			{ type: "project_trust", cwd: options.cwd },
-			options.projectTrustContext,
-		);
-		for (const error of errors) {
-			options.onExtensionError?.(`Extension "${error.extensionPath}" project_trust error: ${error.error}`);
-		}
-		if (result) {
-			const trusted = result.trusted === "yes";
-			if (result.remember === true) {
-				options.trustStore.set(options.cwd, trusted);
-			}
-			return trusted;
-		}
 	}
 
 	const decision = options.trustStore.get(options.cwd);

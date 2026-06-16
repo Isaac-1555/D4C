@@ -50,121 +50,11 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
-// Extension system
-export type {
-	AgentEndEvent,
-	AgentStartEvent,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	AppKeybinding,
-	AutocompleteProviderFactory,
-	BashToolCallEvent,
-	BeforeAgentStartEvent,
-	BeforeAgentStartEventResult,
-	BeforeProviderRequestEvent,
-	BeforeProviderRequestEventResult,
-	BuildSystemPromptOptions,
-	CompactOptions,
-	ContextEvent,
-	ContextUsage,
-	CustomToolCallEvent,
-	EditToolCallEvent,
-	ExecOptions,
-	ExecResult,
-	Extension,
-	ExtensionActions,
-	ExtensionAPI,
-	ExtensionCommandContext,
-	ExtensionCommandContextActions,
-	ExtensionContext,
-	ExtensionContextActions,
-	ExtensionError,
-	ExtensionEvent,
-	ExtensionFactory,
-	ExtensionFlag,
-	ExtensionHandler,
-	ExtensionRuntime,
-	ExtensionShortcut,
-	ExtensionUIContext,
-	ExtensionUIDialogOptions,
-	ExtensionWidgetOptions,
-	FindToolCallEvent,
-	GrepToolCallEvent,
-	InputEvent,
-	InputEventResult,
-	InputSource,
-	KeybindingsManager,
-	LoadExtensionsResult,
-	LsToolCallEvent,
-	MessageRenderer,
-	MessageRenderOptions,
-	ProjectTrustContext,
-	ProjectTrustEvent,
-	ProjectTrustEventDecision,
-	ProjectTrustEventResult,
-	ProjectTrustHandler,
-	ProviderConfig,
-	ProviderModelConfig,
-	ReadToolCallEvent,
-	RegisteredCommand,
-	RegisteredTool,
-	ResolvedCommand,
-	SessionBeforeCompactEvent,
-	SessionBeforeForkEvent,
-	SessionBeforeSwitchEvent,
-	SessionBeforeTreeEvent,
-	SessionCompactEvent,
-	SessionShutdownEvent,
-	SessionStartEvent,
-	SessionTreeEvent,
-	SlashCommandInfo,
-	SlashCommandSource,
-	SourceInfo,
-	TerminalInputHandler,
-	ToolCallEvent,
-	ToolCallEventResult,
-	ToolDefinition,
-	ToolExecutionMode,
-	ToolInfo,
-	ToolRenderResultOptions,
-	ToolResultEvent,
-	TurnEndEvent,
-	TurnStartEvent,
-	UserBashEvent,
-	UserBashEventResult,
-	WidgetPlacement,
-	WorkingIndicatorOptions,
-	WriteToolCallEvent,
-} from "./core/extensions/index.ts";
-export {
-	createExtensionRuntime,
-	defineTool,
-	discoverAndLoadExtensions,
-	ExtensionRunner,
-	isBashToolResult,
-	isEditToolResult,
-	isFindToolResult,
-	isGrepToolResult,
-	isLsToolResult,
-	isReadToolResult,
-	isToolCallEventType,
-	isWriteToolResult,
-	wrapRegisteredTool,
-	wrapRegisteredTools,
-} from "./core/extensions/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
-export type {
-	PackageManager,
-	PathMetadata,
-	ProgressCallback,
-	ProgressEvent,
-	ResolvedPaths,
-	ResolvedResource,
-} from "./core/package-manager.ts";
-export { DefaultPackageManager } from "./core/package-manager.ts";
+
 export type { ResourceCollision, ResourceDiagnostic, ResourceLoader } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
 // SDK for programmatic usage
@@ -237,6 +127,7 @@ export {
 	type Skill,
 	type SkillFrontmatter,
 } from "./core/skills.ts";
+export type { SourceInfo } from "./core/source-info.ts";
 export { createSyntheticSourceInfo } from "./core/source-info.ts";
 // Tools
 export {
@@ -296,7 +187,7 @@ export {
 	type ProjectTrustUpdate,
 } from "./core/trust-manager.ts";
 // Main entry point
-export { type MainOptions, main } from "./main.ts";
+export { main } from "./main.ts";
 // Run modes for programmatic SDK usage
 export {
 	InteractiveMode,
@@ -307,8 +198,6 @@ export {
 	type RpcClientOptions,
 	type RpcCommand,
 	type RpcEventListener,
-	type RpcExtensionUIRequest,
-	type RpcExtensionUIResponse,
 	type RpcResponse,
 	type RpcSessionState,
 	runPrintMode,
@@ -325,9 +214,6 @@ export {
 	CustomEditor,
 	CustomMessageComponent,
 	DynamicBorder,
-	ExtensionEditorComponent,
-	ExtensionInputComponent,
-	ExtensionSelectorComponent,
 	FooterComponent,
 	keyHint,
 	keyText,

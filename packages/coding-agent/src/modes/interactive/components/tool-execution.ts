@@ -1,5 +1,5 @@
-import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
-import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
+import { Box, type Component, Container, getCapabilities, Image, Spacer, Text, type TUI } from "d4c-tui";
+import type { ToolDefinition, ToolRenderContext } from "../../../core/tool-types.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import { getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";

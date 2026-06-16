@@ -14,10 +14,30 @@ import {
 	Spacer,
 	truncateToWidth,
 	visibleWidth,
-} from "@earendil-works/pi-tui";
+} from "d4c-tui";
 import { CONFIG_DIR_NAME } from "../../../config.ts";
-import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
+
+interface PathMetadata {
+	origin: "package" | "top-level";
+	source: string;
+	scope: "user" | "project" | "temporary";
+	baseDir?: string;
+}
+
+interface ResolvedResource {
+	path: string;
+	enabled: boolean;
+	metadata: PathMetadata;
+}
+
+interface ResolvedPaths {
+	extensions: ResolvedResource[];
+	skills: ResolvedResource[];
+	prompts: ResolvedResource[];
+	themes: ResolvedResource[];
+}
+
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { rawKeyHint } from "./keybinding-hints.ts";
