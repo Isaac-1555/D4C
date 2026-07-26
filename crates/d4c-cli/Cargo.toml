@@ -1,0 +1,17 @@
+[package]
+name = "d4c-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "d4c"
+path = "src/main.rs"
+
+[dependencies]
+d4c-core.workspace = true
+d4c-tui.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
