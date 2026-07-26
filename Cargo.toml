@@ -48,3 +48,4 @@ thiserror = "2"
 # Utilities
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+textwrap = "0.16"

@@ -27,7 +27,6 @@ impl InputState {
         if self.cursor == 0 {
             return;
         }
-        // Move back one Unicode char (not just one byte)
         let prev = self.content[..self.cursor]
             .char_indices()
             .next_back()
@@ -108,5 +107,9 @@ impl InputState {
                 self.cursor = 0;
             }
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.content.is_empty()
     }
 }
