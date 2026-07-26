@@ -12,6 +12,7 @@ const GUTTER: &str = "▍";
 
 pub struct Sidebar {
     pub model: String,
+    pub effort: Option<String>,
     pub tokens_used: Option<usize>,
     pub tokens_max: Option<usize>,
     pub elapsed: String,
@@ -24,6 +25,7 @@ impl Sidebar {
     pub fn new() -> Self {
         Self {
             model: String::new(),
+            effort: None,
             tokens_used: None,
             tokens_max: None,
             elapsed: "00:00:00".into(),
@@ -52,6 +54,13 @@ impl Sidebar {
         session_rows.push(Line::from(vec![
             Span::styled("model  ", label_style),
             Span::styled(&self.model, value_style),
+        ]));
+        session_rows.push(Line::from(vec![
+            Span::styled("effort ", label_style),
+            Span::styled(
+                self.effort.as_deref().unwrap_or("—"),
+                value_style,
+            ),
         ]));
         session_rows.push(Line::from(vec![
             Span::styled("tokens ", label_style),

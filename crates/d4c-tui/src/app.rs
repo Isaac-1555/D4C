@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use d4c_core::commands::CommandRegistry;
 use d4c_core::plan::Plan;
+use d4c_core::provider::{EffortLevel, OpenCodeProvider, Provider};
 use d4c_core::router::ModelRouter;
 use crate::event::{poll_event, AppEvent, EventResult};
 use crate::input::InputState;
@@ -29,6 +30,7 @@ pub struct App {
     commands: CommandRegistry,
     router: ModelRouter,
     current_model: String,
+    pinned_model: Option<String>,
     active_plan: Option<Plan>,
     plan_view: PlanView,
     building: bool,
@@ -38,6 +40,12 @@ pub struct App {
     spinner_frame: usize,
     icons_enabled: bool,
     start_time: Instant,
+    provider: Option<OpenCodeProvider>,
+    runtime: Option<tokio::runtime::Runtime>,
+    effort: EffortLevel,
+    opencode_process: Option<std::process::Child>,
+    model_picker: bool,
+    model_selection: usize,
 }
 
 #[derive(PartialEq)]
@@ -51,16 +59,93 @@ enum PlanView {
 impl App {
     pub fn new() -> Self {
         let mut router = ModelRouter::new();
-        router.load_default_catalog();
-        let initial_model = router.route("hello").selected_model.clone();
 
-        Self {
+        // Load saved config
+        let saved_config = d4c_core::config::ConfigManager::load().ok();
+        let saved_effort = saved_config
+            .as_ref()
+            .and_then(|c| c.global().model.effort.clone())
+            .and_then(|s| EffortLevel::from_str(&s));
+        let base_url = saved_config
+            .as_ref()
+            .and_then(|c| c.global().provider.base_url.clone());
+
+        let runtime = tokio::runtime::Runtime::new().ok();
+
+        let (provider, connected, opencode_process) = match runtime.as_ref() {
+            Some(rt) => {
+                let mut p = OpenCodeProvider::new(base_url.clone());
+                let mut healthy = rt.block_on(p.check_health()).unwrap_or(false);
+
+                // Auto-start OpenCode server if not running
+                let spawned = if !healthy {
+                    match std::process::Command::new("opencode")
+                        .args(["serve", "--port", "4096"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                    {
+                        Ok(mut child) => {
+                            std::thread::sleep(Duration::from_secs(3));
+                            let ok = rt.block_on(p.check_health()).unwrap_or(false);
+                            if ok {
+                                tracing::info!("Auto-started OpenCode server");
+                                healthy = true;
+                                Some(child)
+                            } else {
+                                let _ = child.kill();
+                                None
+                            }
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    None
+                };
+
+                if healthy {
+                    tracing::info!("Connected to OpenCode server at {}", p.base_url());
+
+                    if let Ok(models) = rt.block_on(p.list_models()) {
+                        if !models.is_empty() {
+                            router.load_from_models(&models);
+                            tracing::info!("Loaded {} models from OpenCode", models.len());
+                        } else {
+                            router.load_default_catalog();
+                        }
+                    } else {
+                        router.load_default_catalog();
+                    }
+
+                    let _ = rt.block_on(p.ensure_session());
+                    (Some(p), true, spawned)
+                } else {
+                    router.load_default_catalog();
+                    (None, false, spawned)
+                }
+            }
+            None => {
+                router.load_default_catalog();
+                (None, false, None)
+            }
+        };
+
+        if let Some(e) = saved_effort {
+            router.set_preferred_effort(Some(e));
+        }
+
+        let initial_decision = router.route("hello");
+        let initial_model = initial_decision.selected_model.clone();
+        let effort = initial_decision.effort;
+
+        let mut app = Self {
             running: true,
             messages: Vec::new(),
             input: InputState::new(),
             commands: CommandRegistry::new(),
             router,
             current_model: initial_model,
+            pinned_model: None,
             active_plan: None,
             plan_view: PlanView::Hidden,
             building: false,
@@ -70,7 +155,22 @@ impl App {
             spinner_frame: 0,
             icons_enabled: true,
             start_time: Instant::now(),
+            provider,
+            runtime,
+            effort,
+            opencode_process,
+            model_picker: false,
+            model_selection: 0,
+        };
+
+        if !connected {
+            app.messages.push(ChatMessage::new(
+                Role::System,
+                "OpenCode server not found and could not be auto-started.\n  Check: opencode is installed? (which opencode)\n  Manual: opencode serve --port 4096",
+            ));
         }
+
+        app
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -101,21 +201,35 @@ impl App {
                             KeyCode::Backspace
                             | KeyCode::Delete
                             | KeyCode::Char('\x7f')
-                            | KeyCode::Char('\x08') => self.input.delete_char(),
+                            | KeyCode::Char('\x08') => {
+                                self.input.delete_char();
+                                if self.model_picker {
+                                    self.model_selection = 0;
+                                }
+                            }
                             KeyCode::Char('h')
                                 if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                             {
                                 self.input.delete_char();
+                                if self.model_picker {
+                                    self.model_selection = 0;
+                                }
                             }
                             KeyCode::Esc => {
-                                if self.plan_view != PlanView::Hidden {
+                                if self.model_picker {
+                                    self.close_model_picker();
+                                } else if self.plan_view != PlanView::Hidden {
                                     self.plan_view = PlanView::Hidden;
                                 }
                             }
                             KeyCode::Enter => {
-                                let input = self.input.submit();
-                                if !input.is_empty() {
-                                    self.handle_input(input);
+                                if self.model_picker {
+                                    self.select_model_picker_model();
+                                } else {
+                                    let input = self.input.submit();
+                                    if !input.is_empty() {
+                                        self.handle_input(input);
+                                    }
                                 }
                             }
                             KeyCode::Tab => {
@@ -126,15 +240,38 @@ impl App {
                                     }
                                 }
                             }
+                            KeyCode::Char('e')
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+                            {
+                                self.cycle_effort();
+                            }
                             KeyCode::Char(_c)
                                 if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                             {
                             }
-                            KeyCode::Char(c) => self.input.insert_char(c),
+                            KeyCode::Char(c) => {
+                                self.input.insert_char(c);
+                                if self.model_picker {
+                                    self.model_selection = 0;
+                                }
+                            }
                             KeyCode::Left => self.input.move_left(),
                             KeyCode::Right => self.input.move_right(),
-                            KeyCode::Up => self.input.scroll_up(),
-                            KeyCode::Down => self.input.scroll_down(),
+                            KeyCode::Up => {
+                                if self.model_picker {
+                                    self.model_selection = self.model_selection.saturating_sub(1);
+                                } else {
+                                    self.input.scroll_up();
+                                }
+                            }
+                            KeyCode::Down => {
+                                if self.model_picker {
+                                    let max = self.filtered_models().len().saturating_sub(1);
+                                    self.model_selection = (self.model_selection + 1).min(max);
+                                } else {
+                                    self.input.scroll_down();
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -154,6 +291,13 @@ impl App {
             crossterm::terminal::LeaveAlternateScreen
         )?;
         terminal.show_cursor()?;
+
+        if let Some(mut child) = self.opencode_process.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            tracing::info!("Stopped auto-started OpenCode server");
+        }
+
         Ok(())
     }
 
@@ -237,6 +381,96 @@ impl App {
                                 ));
                             }
                         }
+                    } else if output == "__NEW_SESSION__" {
+                        self.messages.clear();
+                        if let Some(ref mut p) = self.provider {
+                            p.reset_session();
+                            if let Some(ref rt) = self.runtime {
+                                let _ = rt.block_on(p.ensure_session());
+                            }
+                        }
+                        self.messages.push(ChatMessage::new(
+                            Role::System,
+                            "New session started.",
+                        ));
+                    } else if output.starts_with("__SET_EFFORT__") {
+                        let level = &output["__SET_EFFORT__".len()..];
+                        if let Some(e) = EffortLevel::from_str(level) {
+                            self.effort = e;
+                            self.router.set_preferred_effort(Some(e));
+                            self.messages.push(ChatMessage::new(
+                                Role::System,
+                                format!("Effort level set to {}", e),
+                            ));
+                        } else {
+                            self.messages.push(ChatMessage::new(
+                                Role::Error,
+                                format!(
+                                    "Unknown effort level: {}. Use low, medium, or high.",
+                                    level
+                                ),
+                            ));
+                        }
+                    } else if output.starts_with("__LOGIN__") {
+                        let url = &output["__LOGIN__".len()..];
+                        self.try_connect(url);
+                    } else if output.starts_with("__SET_CONFIG__") {
+                        let rest = &output["__SET_CONFIG__".len()..];
+                        let mut parts = rest.splitn(2, ' ');
+                        let key = parts.next().unwrap_or("");
+                        let val = parts.next().unwrap_or("");
+                        match key {
+                            "base_url" => {
+                                self.messages.push(ChatMessage::new(
+                                    Role::System,
+                                    format!("Provider URL saved. Use /login opencode {} to connect.", val),
+                                ));
+                            }
+                            _ => {
+                                self.messages.push(ChatMessage::new(
+                                    Role::System,
+                                    format!("Config key '{}' set but requires restart to take effect.", key),
+                                ));
+                            }
+                        }
+                    } else if output.starts_with("__MODEL__") {
+                        let name = output["__MODEL__".len()..].trim().to_string();
+                        if name.is_empty() {
+                            self.model_picker = true;
+                            self.model_selection = 0;
+                            self.input = InputState::new();
+                        } else {
+                            // Find matching model
+                            let lower = name.to_lowercase();
+                            let matches: Vec<&d4c_core::router::CatalogModel> = self
+                                .router
+                                .catalog()
+                                .iter()
+                                .filter(|m| m.id.to_lowercase().contains(&lower))
+                                .collect();
+                            if matches.is_empty() {
+                                self.messages.push(ChatMessage::new(
+                                    Role::Error,
+                                    format!("No model matching '{}'", name),
+                                ));
+                            } else if matches.len() == 1 {
+                                let model = matches[0].id.clone();
+                                self.pinned_model = Some(model.clone());
+                                self.current_model = model.clone();
+                                self.messages.push(ChatMessage::new(
+                                    Role::System,
+                                    format!("Model pinned to {}", model),
+                                ));
+                            } else {
+                                let mut list =
+                                    format!("Multiple models match '{}':\n", name);
+                                for m in &matches {
+                                    list.push_str(&format!("  {}\n", m.id));
+                                }
+                                list.push_str("Be more specific.");
+                                self.messages.push(ChatMessage::new(Role::System, list));
+                            }
+                        }
                     } else if input.trim() == "/clear" {
                         self.messages.clear();
                         self.messages.push(ChatMessage::new(
@@ -253,11 +487,58 @@ impl App {
                 }
             }
         } else {
+            // Chat message — route and send to provider
             let decision = self.router.route(&input);
-            self.current_model = decision.selected_model.clone();
-            let response = self.mock_provider_respond(&input, &decision);
-            self.messages
-                .push(ChatMessage::new(Role::Agent, response));
+            self.current_model = if let Some(ref pinned) = self.pinned_model {
+                pinned.clone()
+            } else {
+                decision.selected_model.clone()
+            };
+            self.agent_busy = true;
+
+            let response = match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
+                Some((provider, rt)) => {
+                    let _ = rt.block_on(provider.ensure_session());
+
+                    let msg = d4c_core::provider::Message {
+                        role: "user".into(),
+                        content: input.clone(),
+                    };
+
+                    match rt.block_on(provider.chat(&[msg], &[])) {
+                        Ok(resp) => {
+                            if resp.tool_calls.is_empty() {
+                                resp.content
+                            } else {
+                                let mut out = resp.content;
+                                for tc in &resp.tool_calls {
+                                    out.push_str(&format!(
+                                        "\n\n[tool call: {} with {:?}]",
+                                        tc.name, tc.arguments
+                                    ));
+                                }
+                                out
+                            }
+                        }
+                        Err(e) => {
+                            format!("[OpenCode error: {}]", e)
+                        }
+                    }
+                }
+                None => {
+                    format!(
+                        "[routed to {} ({})]\nReceived: \"{}\"\n\n\
+                         No OpenCode server connected. Start it with `opencode serve` \
+                         or check your connection.",
+                        decision.selected_model,
+                        decision.tier,
+                        input.chars().take(80).collect::<String>()
+                    )
+                }
+            };
+
+            self.agent_busy = false;
+            self.messages.push(ChatMessage::new(Role::Agent, response));
         }
     }
 
@@ -365,19 +646,148 @@ impl App {
         }
     }
 
-    fn mock_provider_respond(
-        &self,
-        input: &str,
-        decision: &d4c_core::router::RoutingDecision,
-    ) -> String {
-        format!(
-            "[routed to {} ({})]\nReceived: \"{}\"\n\n\
-             This is a placeholder response. The OpenCode provider integration \
-             will replace this with real model output.",
-            decision.selected_model,
-            decision.tier,
-            input.chars().take(80).collect::<String>()
+    fn cycle_effort(&mut self) {
+        self.effort = match self.effort {
+            EffortLevel::Low => EffortLevel::Medium,
+            EffortLevel::Medium => EffortLevel::High,
+            EffortLevel::High => EffortLevel::Low,
+        };
+        self.router.set_preferred_effort(Some(self.effort));
+        self.messages.push(ChatMessage::new(
+            Role::System,
+            format!("Effort: {} (Ctrl+E to cycle)", self.effort),
+        ));
+    }
+
+    fn try_connect(&mut self, url: &str) {
+        match self.runtime.as_ref() {
+            Some(rt) => {
+                let mut p = OpenCodeProvider::new(Some(url.to_string()));
+                let healthy = rt.block_on(p.check_health()).unwrap_or(false);
+                if healthy {
+                    tracing::info!("Connected to OpenCode server at {}", url);
+                    if let Ok(models) = rt.block_on(p.list_models()) {
+                        if !models.is_empty() {
+                            self.router.load_from_models(&models);
+                        }
+                    }
+                    let _ = rt.block_on(p.ensure_session());
+                    self.provider = Some(p);
+                    self.messages.push(ChatMessage::new(
+                        Role::System,
+                        format!("Connected to OpenCode at {}", url),
+                    ));
+                } else {
+                    self.messages.push(ChatMessage::new(
+                        Role::Error,
+                        format!("Could not reach OpenCode at {}. Is the server running?", url),
+                    ));
+                }
+            }
+            None => {
+                self.messages.push(ChatMessage::new(
+                    Role::Error,
+                    "Cannot connect: no async runtime available.",
+                ));
+            }
+        }
+    }
+
+    fn filtered_models(&self) -> Vec<&d4c_core::router::CatalogModel> {
+        let lower = self.input.content.to_lowercase();
+        if lower.is_empty() {
+            self.router.catalog().iter().collect()
+        } else {
+            self.router
+                .catalog()
+                .iter()
+                .filter(|m| m.id.to_lowercase().contains(&lower))
+                .collect()
+        }
+    }
+
+    fn close_model_picker(&mut self) {
+        self.model_picker = false;
+        self.input = InputState::new();
+    }
+
+    fn select_model_picker_model(&mut self) {
+        let model_id = {
+            let filtered = self.filtered_models();
+            if filtered.is_empty() {
+                return;
+            }
+            let idx = self.model_selection.min(filtered.len() - 1);
+            filtered[idx].id.clone()
+        };
+        self.pinned_model = Some(model_id.clone());
+        self.current_model = model_id.clone();
+        self.messages.push(ChatMessage::new(
+            Role::System,
+            format!("Model pinned to {}", model_id),
+        ));
+        self.close_model_picker();
+    }
+
+    fn draw_model_picker(&self, f: &mut Frame, area: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        let filtered = self.filtered_models();
+        let mut lines: Vec<Line> = Vec::new();
+
+        for (i, m) in filtered.iter().enumerate() {
+            let selected = i == self.model_selection;
+            let prefix = if selected { " ◉ " } else { " ○ " };
+            let style = if selected {
+                Style::default()
+                    .fg(self.colors.accent_user)
+                    .add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default().fg(self.colors.text)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{}{}  [{}]", prefix, m.id, m.effort),
+                style,
+            )));
+        }
+
+        if filtered.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " No models match your filter",
+                Style::default().fg(self.colors.text_muted),
+            )));
+        }
+
+        let list = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Model Picker ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.colors.accent_system)),
+            )
+            .bg(self.colors.surface);
+        f.render_widget(list, chunks[0]);
+
+        let info = Paragraph::new(Line::from(Span::styled(
+            " Type to filter · ↑↓ navigate · Enter select · Esc cancel ",
+            Style::default().fg(self.colors.text_muted),
+        )))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(self.colors.border)),
         )
+        .bg(self.colors.surface);
+        f.render_widget(info, chunks[1]);
+
+        self.draw_input(f, chunks[2]);
     }
 
     fn draw(&self, f: &mut Frame) {
@@ -399,7 +809,9 @@ impl App {
             (area, None)
         };
 
-        if self.plan_view != PlanView::Hidden {
+        if self.model_picker {
+            self.draw_model_picker(f, chat_area);
+        } else if self.plan_view != PlanView::Hidden {
             self.draw_plan_view(f, chat_area);
         } else {
             self.draw_chat_view(f, chat_area);
@@ -553,7 +965,9 @@ impl App {
     }
 
     fn draw_input(&self, f: &mut Frame, area: Rect) {
-        let title = if self.plan_view != PlanView::Hidden {
+        let title = if self.model_picker {
+            " Filter (Esc to cancel) "
+        } else if self.plan_view != PlanView::Hidden {
             " Plan Input (Esc to exit) "
         } else {
             ""
@@ -566,9 +980,15 @@ impl App {
 
         let mut spans: Vec<Span> = vec![prompt];
 
-        if self.input.is_empty() && self.plan_view == PlanView::Hidden {
+        if self.input.is_empty() && !self.model_picker && self.plan_view == PlanView::Hidden {
             let placeholder = Span::styled(
                 "Type a message…  (/ for commands)",
+                Style::default().fg(self.colors.text_muted),
+            );
+            spans.push(placeholder);
+        } else if self.input.is_empty() && self.model_picker {
+            let placeholder = Span::styled(
+                "Type to filter models…",
                 Style::default().fg(self.colors.text_muted),
             );
             spans.push(placeholder);
@@ -579,9 +999,13 @@ impl App {
             ));
         }
 
-        let border_style = match self.plan_view {
-            PlanView::Hidden => Style::default().fg(self.colors.border_active),
-            _ => Style::default().fg(self.colors.border),
+        let border_style = if self.model_picker {
+            Style::default().fg(self.colors.accent_system)
+        } else {
+            match self.plan_view {
+                PlanView::Hidden => Style::default().fg(self.colors.border_active),
+                _ => Style::default().fg(self.colors.border),
+            }
         };
 
         let input = Paragraph::new(Line::from(spans)).block(
@@ -643,10 +1067,11 @@ impl App {
 
     fn draw_status(&self, f: &mut Frame, area: Rect) {
         let mut sb = StatusBar::new();
-        sb.connected = true;
+        sb.connected = self.provider.is_some();
         sb.agent_busy = self.agent_busy;
         sb.spinner_frame = self.spinner_frame;
         sb.model = self.current_model.clone();
+        sb.effort = self.effort.to_string();
         sb.version = "0.1.0".into();
         sb.icons_enabled = self.icons_enabled;
         sb.render(f, area, &self.colors);
@@ -655,6 +1080,7 @@ impl App {
     fn draw_sidebar(&self, f: &mut Frame, area: Rect) {
         let mut sb = Sidebar::new();
         sb.model = self.current_model.clone();
+        sb.effort = Some(self.effort.to_string());
         let d = self.start_time.elapsed();
         sb.elapsed = format!(
             "{:02}:{:02}:{:02}",

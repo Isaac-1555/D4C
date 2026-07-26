@@ -19,6 +19,7 @@ pub struct StatusBar {
     pub agent_busy: bool,
     pub spinner_frame: usize,
     pub model: String,
+    pub effort: String,
     pub version: String,
     pub icons_enabled: bool,
 }
@@ -30,6 +31,7 @@ impl StatusBar {
             agent_busy: false,
             spinner_frame: 0,
             model: String::new(),
+            effort: String::new(),
             version: String::new(),
             icons_enabled: true,
         }
@@ -67,8 +69,14 @@ impl StatusBar {
             dot,
             Style::default().fg(dot_color).bg(colors.surface),
         );
+
+        let effort_tag = if !self.effort.is_empty() {
+            format!(" [{}]", self.effort)
+        } else {
+            String::new()
+        };
         let model_span = Span::styled(
-            format!(" {} ", self.model),
+            format!(" {}{} ", self.model, effort_tag),
             Style::default().fg(colors.text).bg(colors.surface),
         );
 
