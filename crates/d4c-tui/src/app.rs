@@ -46,6 +46,16 @@ pub struct App {
     opencode_process: Option<std::process::Child>,
     model_picker: bool,
     model_selection: usize,
+    config_manager: Option<d4c_core::config::ConfigManager>,
+    last_used_model: Option<String>,
+}
+
+fn provider_priority(provider: &str) -> u8 {
+    match provider {
+        "opencode" => 0,
+        "opencode-go" => 1,
+        _ => 2,
+    }
 }
 
 #[derive(PartialEq)]
@@ -69,6 +79,9 @@ impl App {
         let base_url = saved_config
             .as_ref()
             .and_then(|c| c.global().provider.base_url.clone());
+        let saved_last_used = saved_config
+            .as_ref()
+            .and_then(|c| c.global().model.last_used_model.clone());
 
         let runtime = tokio::runtime::Runtime::new().ok();
 
@@ -135,7 +148,11 @@ impl App {
         }
 
         let initial_decision = router.route("hello");
-        let initial_model = initial_decision.selected_model.clone();
+        let initial_model = if saved_last_used.is_some() {
+            saved_last_used.clone().unwrap()
+        } else {
+            initial_decision.selected_model.clone()
+        };
         let effort = initial_decision.effort;
 
         let mut app = Self {
@@ -145,7 +162,7 @@ impl App {
             commands: CommandRegistry::new(),
             router,
             current_model: initial_model,
-            pinned_model: None,
+            pinned_model: saved_last_used.clone(),
             active_plan: None,
             plan_view: PlanView::Hidden,
             building: false,
@@ -161,6 +178,8 @@ impl App {
             opencode_process,
             model_picker: false,
             model_selection: 0,
+            config_manager: saved_config,
+            last_used_model: saved_last_used,
         };
 
         if !connected {
@@ -695,15 +714,35 @@ impl App {
 
     fn filtered_models(&self) -> Vec<&d4c_core::router::CatalogModel> {
         let lower = self.input.content.to_lowercase();
-        if lower.is_empty() {
+        let mut models: Vec<&d4c_core::router::CatalogModel> = if lower.is_empty() {
             self.router.catalog().iter().collect()
         } else {
             self.router
                 .catalog()
                 .iter()
-                .filter(|m| m.id.to_lowercase().contains(&lower))
+                .filter(|m| {
+                    m.id.to_lowercase().contains(&lower)
+                        || m.name.to_lowercase().contains(&lower)
+                        || m.provider.to_lowercase().contains(&lower)
+                })
                 .collect()
-        }
+        };
+
+        models.sort_by(|a, b| {
+            let a_last = self.last_used_model.as_deref() == Some(a.id.as_str());
+            let b_last = self.last_used_model.as_deref() == Some(b.id.as_str());
+            if a_last != b_last {
+                return b_last.cmp(&a_last);
+            }
+            let a_priority = provider_priority(&a.provider);
+            let b_priority = provider_priority(&b.provider);
+            if a_priority != b_priority {
+                return a_priority.cmp(&b_priority);
+            }
+            a.name.cmp(&b.name)
+        });
+
+        models
     }
 
     fn close_model_picker(&mut self) {
@@ -722,10 +761,18 @@ impl App {
         };
         self.pinned_model = Some(model_id.clone());
         self.current_model = model_id.clone();
+        self.last_used_model = Some(model_id.clone());
         self.messages.push(ChatMessage::new(
             Role::System,
             format!("Model pinned to {}", model_id),
         ));
+
+        if let Some(ref mut config) = self.config_manager {
+            let mut cfg = config.global().clone();
+            cfg.model.last_used_model = Some(model_id);
+            let _ = config.save_global(cfg);
+        }
+
         self.close_model_picker();
     }
 
@@ -741,19 +788,73 @@ impl App {
 
         let filtered = self.filtered_models();
         let mut lines: Vec<Line> = Vec::new();
+        let mut selectable_indices: Vec<usize> = Vec::new();
 
-        for (i, m) in filtered.iter().enumerate() {
-            let selected = i == self.model_selection;
+        let mut last_provider = "";
+        let mut last_was_header = false;
+
+        for m in filtered.iter() {
+            let is_last = self.last_used_model.as_deref() == Some(m.id.as_str());
+
+            if is_last && !last_was_header {
+                lines.push(Line::from(Span::styled(
+                    " Last used",
+                    Style::default()
+                        .fg(self.colors.accent_system)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                last_was_header = true;
+                last_provider = "";
+            }
+
+            if !is_last && m.provider != last_provider {
+                let header = match m.provider.as_str() {
+                    "opencode" => " OpenCode Zen",
+                    "opencode-go" => " OpenCode Go",
+                    _ => "",
+                };
+                if !header.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        header,
+                        Style::default()
+                            .fg(self.colors.accent_system)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    last_was_header = true;
+                } else if last_provider != m.provider {
+                    lines.push(Line::from(Span::styled(
+                        format!(" {}", m.provider),
+                        Style::default()
+                            .fg(self.colors.accent_system)
+                            .add_modifier(Modifier::BOLD),
+                    )));
+                    last_was_header = true;
+                }
+                last_provider = &m.provider;
+            }
+
+            if !is_last {
+                last_was_header = false;
+            }
+
+            selectable_indices.push(lines.len());
+
+            let selected = selectable_indices.len() - 1 == self.model_selection;
             let prefix = if selected { " ◉ " } else { " ○ " };
             let style = if selected {
                 Style::default()
                     .fg(self.colors.accent_user)
                     .add_modifier(Modifier::REVERSED)
+            } else if is_last {
+                Style::default()
+                    .fg(self.colors.accent_user)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(self.colors.text)
             };
+            let tag = if is_last { " (last used)" } else { "" };
             lines.push(Line::from(Span::styled(
-                format!("{}{}  [{}]", prefix, m.id, m.effort),
+                format!("{}{}  [{}]{}", prefix, m.name, m.effort, tag),
                 style,
             )));
         }
@@ -765,7 +866,15 @@ impl App {
             )));
         }
 
+        let visible_height = chunks[0].height.saturating_sub(2) as usize;
+        let scroll_offset = if self.model_selection >= visible_height {
+            (self.model_selection - visible_height + 1) as u16
+        } else {
+            0
+        };
+
         let list = Paragraph::new(lines)
+            .scroll((scroll_offset, 0))
             .block(
                 Block::default()
                     .title(" Model Picker ")

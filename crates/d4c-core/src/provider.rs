@@ -40,6 +40,7 @@ pub struct TokenUsage {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
+    pub provider_id: String,
     pub context_window: u32,
     pub supports_tools: bool,
     pub supports_streaming: bool,
@@ -264,7 +265,7 @@ impl Provider for OpenCodeProvider {
         let mut models = vec![];
         if let Some(providers) = data["providers"].as_array() {
             for provider in providers {
-                let _provider_id = provider["id"].as_str().unwrap_or("unknown");
+                let provider_id = provider["id"].as_str().unwrap_or("unknown").to_string();
                 if let Some(model_map) = provider["models"].as_object() {
                     for (model_id, info) in model_map {
                         let name = info["name"].as_str().unwrap_or(model_id);
@@ -274,6 +275,7 @@ impl Provider for OpenCodeProvider {
                         models.push(ModelInfo {
                             id: model_id.clone(),
                             name: name.to_string(),
+                            provider_id: provider_id.clone(),
                             context_window,
                             supports_tools,
                             supports_streaming: true,

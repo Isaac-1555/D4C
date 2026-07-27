@@ -19,6 +19,7 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPreferences {
     pub default_model: Option<String>,
+    pub last_used_model: Option<String>,
     pub router_enabled: bool,
     pub effort: Option<String>,
 }
@@ -67,6 +68,7 @@ impl Default for GlobalConfig {
             },
             model: ModelPreferences {
                 default_model: None,
+                last_used_model: None,
                 router_enabled: true,
                 effort: None,
             },

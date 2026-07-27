@@ -28,6 +28,8 @@ impl std::fmt::Display for TaskTier {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CatalogModel {
     pub id: String,
+    pub name: String,
+    pub provider: String,
     pub tier: TaskTier,
     pub effort: EffortLevel,
     pub supports_tools: bool,
@@ -50,18 +52,24 @@ impl ModelRouter {
         self.catalog = vec![
             CatalogModel {
                 id: "big-pickle".into(),
+                name: "Big Pickle".into(),
+                provider: "opencode".into(),
                 tier: TaskTier::Complex,
                 effort: EffortLevel::High,
                 supports_tools: true,
             },
             CatalogModel {
                 id: "gpt-4o-mini".into(),
+                name: "GPT-4o Mini".into(),
+                provider: "opencode".into(),
                 tier: TaskTier::Simple,
                 effort: EffortLevel::Low,
                 supports_tools: true,
             },
             CatalogModel {
                 id: "gpt-4o".into(),
+                name: "GPT-4o".into(),
+                provider: "opencode".into(),
                 tier: TaskTier::Complex,
                 effort: EffortLevel::Medium,
                 supports_tools: true,
@@ -74,6 +82,8 @@ impl ModelRouter {
             .iter()
             .map(|m| CatalogModel {
                 id: m.id.clone(),
+                name: m.name.clone(),
+                provider: m.provider_id.clone(),
                 tier: if m.supports_tools {
                     TaskTier::Complex
                 } else {
