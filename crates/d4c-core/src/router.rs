@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct RoutingDecision {
     pub task_summary: String,
     pub selected_model: String,
+    pub selected_provider: String,
     pub tier: TaskTier,
     pub effort: EffortLevel,
     pub reason: String,
@@ -122,13 +123,15 @@ impl ModelRouter {
                     .iter()
                     .find(|m| m.tier == tier && m.supports_tools)
             })
-            .or_else(|| self.catalog.first())
-            .map(|m| m.id.clone())
-            .unwrap_or_else(|| "default".into());
+            .or_else(|| self.catalog.first());
+
+        let selected_model = model.map(|m| m.id.clone()).unwrap_or_else(|| "default".into());
+        let selected_provider = model.map(|m| m.provider.clone()).unwrap_or_else(|| "unknown".into());
 
         RoutingDecision {
             task_summary: task.chars().take(100).collect(),
-            selected_model: model,
+            selected_model,
+            selected_provider,
             tier,
             effort,
             reason: format!(

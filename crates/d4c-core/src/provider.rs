@@ -55,7 +55,7 @@ pub struct ProviderCapabilities {
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    async fn chat(&self, messages: &[Message], tools: &[Tool]) -> Result<ChatResponse>;
+    async fn chat(&self, messages: &[Message], tools: &[Tool], options: &ChatOptions) -> Result<ChatResponse>;
     async fn list_models(&self) -> Result<Vec<ModelInfo>>;
     fn name(&self) -> &str;
     fn capabilities(&self) -> ProviderCapabilities;
@@ -115,6 +115,14 @@ impl EffortLevel {
     pub fn variants() -> &'static [EffortLevel] {
         &[EffortLevel::Low, EffortLevel::Medium, EffortLevel::High]
     }
+}
+
+// ---- Chat Options ----
+
+#[derive(Debug, Clone, Default)]
+pub struct ChatOptions {
+    pub provider_id: Option<String>,
+    pub model_id: Option<String>,
 }
 
 // ---- OpenCode Provider ----
@@ -185,7 +193,7 @@ impl OpenCodeProvider {
 
 #[async_trait]
 impl Provider for OpenCodeProvider {
-    async fn chat(&self, messages: &[Message], _tools: &[Tool]) -> Result<ChatResponse> {
+    async fn chat(&self, messages: &[Message], _tools: &[Tool], options: &ChatOptions) -> Result<ChatResponse> {
         let session_id = self
             .session_id
             .clone()
@@ -198,13 +206,18 @@ impl Provider for OpenCodeProvider {
             .map(|m| m.content.as_str())
             .unwrap_or("");
 
+        let mut body = serde_json::json!({
+            "parts": [{"type": "text", "text": user_msg}]
+        });
+        if let (Some(pid), Some(mid)) = (options.provider_id.as_ref(), options.model_id.as_ref()) {
+            body["model"] = serde_json::json!({"providerID": pid, "modelID": mid});
+        }
+
         let url = format!("{}/session/{}/message", self.base_url, session_id);
         let resp = self
             .client
             .post(&url)
-            .json(&serde_json::json!({
-                "parts": [{"type": "text", "text": user_msg}]
-            }))
+            .json(&body)
             .send()
             .await
             .context("Failed to send message to OpenCode")?;

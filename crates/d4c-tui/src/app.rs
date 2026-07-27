@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use d4c_core::commands::CommandRegistry;
 use d4c_core::plan::Plan;
-use d4c_core::provider::{EffortLevel, OpenCodeProvider, Provider};
+use d4c_core::provider::{ChatOptions, EffortLevel, OpenCodeProvider, Provider};
 use d4c_core::router::ModelRouter;
 use crate::event::{poll_event, AppEvent, EventResult};
 use crate::input::InputState;
@@ -30,6 +30,7 @@ pub struct App {
     commands: CommandRegistry,
     router: ModelRouter,
     current_model: String,
+    current_provider: String,
     pinned_model: Option<String>,
     active_plan: Option<Plan>,
     plan_view: PlanView,
@@ -153,6 +154,7 @@ impl App {
         } else {
             initial_decision.selected_model.clone()
         };
+        let initial_provider = initial_decision.selected_provider.clone();
         let effort = initial_decision.effort;
 
         let mut app = Self {
@@ -162,6 +164,7 @@ impl App {
             commands: CommandRegistry::new(),
             router,
             current_model: initial_model,
+            current_provider: initial_provider,
             pinned_model: saved_last_used.clone(),
             active_plan: None,
             plan_view: PlanView::Hidden,
@@ -417,6 +420,12 @@ impl App {
                         if let Some(e) = EffortLevel::from_str(level) {
                             self.effort = e;
                             self.router.set_preferred_effort(Some(e));
+                            // Re-route to pick a model matching the new effort
+                            let decision = self.router.route("hello");
+                            if self.pinned_model.is_none() {
+                                self.current_model = decision.selected_model;
+                                self.current_provider = decision.selected_provider;
+                            }
                             self.messages.push(ChatMessage::new(
                                 Role::System,
                                 format!("Effort level set to {}", e),
@@ -474,8 +483,10 @@ impl App {
                                 ));
                             } else if matches.len() == 1 {
                                 let model = matches[0].id.clone();
+                                let provider = matches[0].provider.clone();
                                 self.pinned_model = Some(model.clone());
                                 self.current_model = model.clone();
+                                self.current_provider = provider;
                                 self.messages.push(ChatMessage::new(
                                     Role::System,
                                     format!("Model pinned to {}", model),
@@ -508,11 +519,10 @@ impl App {
         } else {
             // Chat message — route and send to provider
             let decision = self.router.route(&input);
-            self.current_model = if let Some(ref pinned) = self.pinned_model {
-                pinned.clone()
-            } else {
-                decision.selected_model.clone()
-            };
+            if self.pinned_model.is_none() {
+                self.current_model = decision.selected_model.clone();
+                self.current_provider = decision.selected_provider.clone();
+            }
             self.agent_busy = true;
 
             let response = match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
@@ -524,7 +534,12 @@ impl App {
                         content: input.clone(),
                     };
 
-                    match rt.block_on(provider.chat(&[msg], &[])) {
+                    let options = ChatOptions {
+                        provider_id: Some(self.current_provider.clone()),
+                        model_id: Some(self.current_model.clone()),
+                    };
+
+                    match rt.block_on(provider.chat(&[msg], &[], &options)) {
                         Ok(resp) => {
                             if resp.tool_calls.is_empty() {
                                 resp.content
@@ -672,6 +687,12 @@ impl App {
             EffortLevel::High => EffortLevel::Low,
         };
         self.router.set_preferred_effort(Some(self.effort));
+        // Re-route with a dummy task to pick a model matching the new effort
+        let decision = self.router.route("hello");
+        if self.pinned_model.is_none() {
+            self.current_model = decision.selected_model;
+            self.current_provider = decision.selected_provider;
+        }
         self.messages.push(ChatMessage::new(
             Role::System,
             format!("Effort: {} (Ctrl+E to cycle)", self.effort),
@@ -751,16 +772,17 @@ impl App {
     }
 
     fn select_model_picker_model(&mut self) {
-        let model_id = {
+        let (model_id, provider_id) = {
             let filtered = self.filtered_models();
             if filtered.is_empty() {
                 return;
             }
             let idx = self.model_selection.min(filtered.len() - 1);
-            filtered[idx].id.clone()
+            (filtered[idx].id.clone(), filtered[idx].provider.clone())
         };
         self.pinned_model = Some(model_id.clone());
         self.current_model = model_id.clone();
+        self.current_provider = provider_id;
         self.last_used_model = Some(model_id.clone());
         self.messages.push(ChatMessage::new(
             Role::System,
