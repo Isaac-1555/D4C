@@ -1,6 +1,6 @@
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
-    style::{Style, Stylize, Modifier},
+    layout::Rect,
+    style::{Style, Stylize},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
@@ -8,14 +8,11 @@ use ratatui::{
 
 use crate::theme::Colors;
 
-const GUTTER: &str = "▍";
-
 pub struct Sidebar {
     pub model: String,
     pub effort: Option<String>,
     pub tokens_used: Option<usize>,
     pub tokens_max: Option<usize>,
-    pub elapsed: String,
     pub branch: String,
     pub cwd: String,
     pub files_changed: Option<usize>,
@@ -28,7 +25,6 @@ impl Sidebar {
             effort: None,
             tokens_used: None,
             tokens_max: None,
-            elapsed: "00:00:00".into(),
             branch: String::new(),
             cwd: String::new(),
             files_changed: None,
@@ -47,8 +43,6 @@ impl Sidebar {
 
         let inner = block.inner(area);
         f.render_widget(block, area);
-
-        let chunks = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(inner);
 
         let mut session_rows: Vec<Line> = Vec::new();
         session_rows.push(Line::from(vec![
@@ -74,10 +68,6 @@ impl Sidebar {
             ),
         ]));
         session_rows.push(Line::from(vec![
-            Span::styled("time   ", label_style),
-            Span::styled(&self.elapsed, value_style),
-        ]));
-        session_rows.push(Line::from(vec![
             Span::styled("branch ", label_style),
             Span::styled(&self.branch, value_style),
         ]));
@@ -96,27 +86,6 @@ impl Sidebar {
         ]));
 
         let session_para = Paragraph::new(session_rows).wrap(Wrap { trim: false });
-        f.render_widget(session_para, chunks[0]);
-
-        let legend: Vec<Span> = [
-            ("you", colors.accent_user),
-            ("agent", colors.accent_agent),
-            ("tool", colors.accent_system),
-            ("system", colors.accent_system),
-        ]
-        .iter()
-        .flat_map(|(label, color)| {
-            vec![
-                Span::styled(GUTTER, Style::default().fg(*color)),
-                Span::styled(
-                    format!("{} ", label),
-                    Style::default().fg(*color).add_modifier(Modifier::BOLD),
-                ),
-            ]
-        })
-        .collect();
-
-        let legend_para = Paragraph::new(Line::from(legend));
-        f.render_widget(legend_para, chunks[1]);
+        f.render_widget(session_para, inner);
     }
 }

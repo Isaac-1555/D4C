@@ -1,11 +1,8 @@
-use chrono::{DateTime, Local};
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Role {
     User,
     Agent,
     Tool,
-    System,
     Error,
 }
 
@@ -15,7 +12,6 @@ impl Role {
             Role::User => "you",
             Role::Agent => "agent",
             Role::Tool => "tool",
-            Role::System => "system",
             Role::Error => "error",
         }
     }
@@ -25,9 +21,8 @@ impl Role {
             "user" | "you" => Role::User,
             "assistant" | "agent" => Role::Agent,
             "tool" => Role::Tool,
-            "system" => Role::System,
             "error" | "err" => Role::Error,
-            _ => Role::System,
+            _ => Role::Error,
         }
     }
 }
@@ -36,7 +31,6 @@ impl Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
-    pub timestamp: DateTime<Local>,
 }
 
 impl ChatMessage {
@@ -44,7 +38,6 @@ impl ChatMessage {
         Self {
             role,
             content: content.into(),
-            timestamp: Local::now(),
         }
     }
 

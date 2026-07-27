@@ -22,14 +22,12 @@ pub enum SessionStatus {
 pub struct Message {
     pub role: Role,
     pub content: String,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Role {
     User,
     Assistant,
-    System,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

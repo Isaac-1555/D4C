@@ -9,7 +9,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use d4c_core::commands::CommandRegistry;
 use d4c_core::plan::Plan;
@@ -40,7 +40,6 @@ pub struct App {
     agent_busy: bool,
     spinner_frame: usize,
     icons_enabled: bool,
-    start_time: Instant,
     provider: Option<OpenCodeProvider>,
     runtime: Option<tokio::runtime::Runtime>,
     effort: EffortLevel,
@@ -86,7 +85,7 @@ impl App {
 
         let runtime = tokio::runtime::Runtime::new().ok();
 
-        let (provider, connected, opencode_process) = match runtime.as_ref() {
+        let (provider, _connected, opencode_process) = match runtime.as_ref() {
             Some(rt) => {
                 let mut p = OpenCodeProvider::new(base_url.clone());
                 let mut healthy = rt.block_on(p.check_health()).unwrap_or(false);
@@ -157,7 +156,7 @@ impl App {
         let initial_provider = initial_decision.selected_provider.clone();
         let effort = initial_decision.effort;
 
-        let mut app = Self {
+        let app = Self {
             running: true,
             messages: Vec::new(),
             input: InputState::new(),
@@ -174,7 +173,6 @@ impl App {
             agent_busy: false,
             spinner_frame: 0,
             icons_enabled: true,
-            start_time: Instant::now(),
             provider,
             runtime,
             effort,
@@ -184,13 +182,6 @@ impl App {
             config_manager: saved_config,
             last_used_model: saved_last_used,
         };
-
-        if !connected {
-            app.messages.push(ChatMessage::new(
-                Role::System,
-                "OpenCode server not found and could not be auto-started.\n  Check: opencode is installed? (which opencode)\n  Manual: opencode serve --port 4096",
-            ));
-        }
 
         app
     }
@@ -202,11 +193,6 @@ impl App {
 
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
-
-        self.messages.push(ChatMessage::new(
-            Role::System,
-            "Welcome to d4c. Type /help for commands, or start chatting.",
-        ));
 
         while self.running {
             terminal.draw(|f| self.draw(f))?;
@@ -345,13 +331,6 @@ impl App {
                                 self.building = true;
                                 self.build_step = 0;
                                 self.plan_view = PlanView::PlanReview;
-                                self.messages.push(ChatMessage::new(
-                                    Role::System,
-                                    format!(
-                                        "Starting build. {} steps to execute.",
-                                        plan.steps.len()
-                                    ),
-                                ));
                                 self.execute_build_step();
                             }
                             Some(_) => {
@@ -380,10 +359,6 @@ impl App {
                         if self.building {
                             self.building = false;
                             self.plan_view = PlanView::Hidden;
-                            self.messages.push(ChatMessage::new(
-                                Role::System,
-                                "Build paused.",
-                            ));
                         }
                     } else if output.starts_with("__PLAN_START__") {
                         let json = &output["__PLAN_START__".len()..];
@@ -391,10 +366,6 @@ impl App {
                             Ok(plan) => {
                                 self.active_plan = Some(plan);
                                 self.plan_view = PlanView::Questions;
-                                self.messages.push(ChatMessage::new(
-                                    Role::System,
-                                    "Plan created! Answer the questions below to refine it.",
-                                ));
                             }
                             Err(e) => {
                                 self.messages.push(ChatMessage::new(
@@ -411,10 +382,6 @@ impl App {
                                 let _ = rt.block_on(p.ensure_session());
                             }
                         }
-                        self.messages.push(ChatMessage::new(
-                            Role::System,
-                            "New session started.",
-                        ));
                     } else if output.starts_with("__SET_EFFORT__") {
                         let level = &output["__SET_EFFORT__".len()..];
                         if let Some(e) = EffortLevel::from_str(level) {
@@ -426,10 +393,6 @@ impl App {
                                 self.current_model = decision.selected_model;
                                 self.current_provider = decision.selected_provider;
                             }
-                            self.messages.push(ChatMessage::new(
-                                Role::System,
-                                format!("Effort level set to {}", e),
-                            ));
                         } else {
                             self.messages.push(ChatMessage::new(
                                 Role::Error,
@@ -446,20 +409,10 @@ impl App {
                         let rest = &output["__SET_CONFIG__".len()..];
                         let mut parts = rest.splitn(2, ' ');
                         let key = parts.next().unwrap_or("");
-                        let val = parts.next().unwrap_or("");
+                        let _val = parts.next().unwrap_or("");
                         match key {
-                            "base_url" => {
-                                self.messages.push(ChatMessage::new(
-                                    Role::System,
-                                    format!("Provider URL saved. Use /login opencode {} to connect.", val),
-                                ));
-                            }
-                            _ => {
-                                self.messages.push(ChatMessage::new(
-                                    Role::System,
-                                    format!("Config key '{}' set but requires restart to take effect.", key),
-                                ));
-                            }
+                            "base_url" => {}
+                            _ => {}
                         }
                     } else if output.starts_with("__MODEL__") {
                         let name = output["__MODEL__".len()..].trim().to_string();
@@ -487,28 +440,12 @@ impl App {
                                 self.pinned_model = Some(model.clone());
                                 self.current_model = model.clone();
                                 self.current_provider = provider;
-                                self.messages.push(ChatMessage::new(
-                                    Role::System,
-                                    format!("Model pinned to {}", model),
-                                ));
                             } else {
-                                let mut list =
-                                    format!("Multiple models match '{}':\n", name);
-                                for m in &matches {
-                                    list.push_str(&format!("  {}\n", m.id));
-                                }
-                                list.push_str("Be more specific.");
-                                self.messages.push(ChatMessage::new(Role::System, list));
                             }
                         }
                     } else if input.trim() == "/clear" {
                         self.messages.clear();
-                        self.messages.push(ChatMessage::new(
-                            Role::System,
-                            "Context cleared.",
-                        ));
                     } else {
-                        self.messages.push(ChatMessage::new(Role::System, output));
                     }
                 }
                 Err(e) => {
@@ -591,10 +528,6 @@ impl App {
                         let all_done = plan.questions.iter().all(|q| q.answer.is_some());
                         if all_done {
                             self.plan_view = PlanView::Assumptions;
-                            self.messages.push(ChatMessage::new(
-                                Role::System,
-                                "All questions answered. Review the assumptions below.\nType the assumption number to toggle, or 'done' to proceed.",
-                            ));
                         }
                     }
                 }
@@ -603,20 +536,9 @@ impl App {
                         plan.assumptions.iter_mut().for_each(|a| a.accepted = true);
                         plan.status = d4c_core::plan::PlanStatus::Draft;
                         self.plan_view = PlanView::PlanReview;
-                        self.messages.push(ChatMessage::new(
-                            Role::System,
-                            "All assumptions accepted. Review the plan below.\nType 'approve' to accept, 'reject <reason>' to redo.",
-                        ));
                     } else if let Ok(num) = input.trim().parse::<usize>() {
                         if let Some(a) = plan.assumptions.iter_mut().find(|a| a.id == num) {
                             a.accepted = !a.accepted;
-                            let status = if a.accepted { "accepted" } else { "rejected" };
-                            self.messages.push(ChatMessage::new(
-                                Role::System,
-                                format!("Assumption {} {}:", num, status),
-                            ));
-                            self.messages
-                                .push(ChatMessage::new(Role::System, format!("  {}", a.statement)));
                         }
                     }
                 }
@@ -624,16 +546,7 @@ impl App {
                     if input.trim().eq_ignore_ascii_case("approve") {
                         plan.status = d4c_core::plan::PlanStatus::Approved;
                         self.plan_view = PlanView::Hidden;
-                        self.messages.push(ChatMessage::new(
-                            Role::System,
-                            "Plan approved! Type /build to execute, or continue chatting.",
-                        ));
                     } else if input.trim().to_lowercase().starts_with("reject") {
-                        let reason = input.trim()["reject".len()..].trim();
-                        self.messages.push(ChatMessage::new(
-                            Role::System,
-                            format!("Plan rejected: {}. Re-running questionnaire...", reason),
-                        ));
                         plan.status = d4c_core::plan::PlanStatus::Rejected;
                         plan.questions.iter_mut().for_each(|q| q.answer = None);
                         plan.assumptions.iter_mut().for_each(|a| a.accepted = false);
@@ -666,15 +579,7 @@ impl App {
                     self.building = false;
                     plan.status = d4c_core::plan::PlanStatus::Completed;
                     self.plan_view = PlanView::Hidden;
-                    self.messages.push(ChatMessage::new(
-                        Role::System,
-                        "Build completed! All steps executed.",
-                    ));
                 } else {
-                    self.messages.push(ChatMessage::new(
-                        Role::System,
-                        "Checkpoint: type /build continue to proceed, /build abort to pause.",
-                    ));
                 }
             }
         }
@@ -693,10 +598,6 @@ impl App {
             self.current_model = decision.selected_model;
             self.current_provider = decision.selected_provider;
         }
-        self.messages.push(ChatMessage::new(
-            Role::System,
-            format!("Effort: {} (Ctrl+E to cycle)", self.effort),
-        ));
     }
 
     fn try_connect(&mut self, url: &str) {
@@ -713,10 +614,6 @@ impl App {
                     }
                     let _ = rt.block_on(p.ensure_session());
                     self.provider = Some(p);
-                    self.messages.push(ChatMessage::new(
-                        Role::System,
-                        format!("Connected to OpenCode at {}", url),
-                    ));
                 } else {
                     self.messages.push(ChatMessage::new(
                         Role::Error,
@@ -784,10 +681,6 @@ impl App {
         self.current_model = model_id.clone();
         self.current_provider = provider_id;
         self.last_used_model = Some(model_id.clone());
-        self.messages.push(ChatMessage::new(
-            Role::System,
-            format!("Model pinned to {}", model_id),
-        ));
 
         if let Some(ref mut config) = self.config_manager {
             let mut cfg = config.global().clone();
@@ -1212,13 +1105,6 @@ impl App {
         let mut sb = Sidebar::new();
         sb.model = self.current_model.clone();
         sb.effort = Some(self.effort.to_string());
-        let d = self.start_time.elapsed();
-        sb.elapsed = format!(
-            "{:02}:{:02}:{:02}",
-            d.as_secs() / 3600,
-            (d.as_secs() / 60) % 60,
-            d.as_secs() % 60
-        );
         sb.branch = "main".into();
         sb.cwd = std::env::current_dir()
             .map(|p| {

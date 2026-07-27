@@ -46,7 +46,6 @@ impl<'a> MessageList<'a> {
             Role::User => self.colors.accent_user,
             Role::Agent => self.colors.accent_agent,
             Role::Tool => self.colors.accent_system,
-            Role::System => self.colors.accent_system,
             Role::Error => self.colors.accent_error,
         }
     }
@@ -85,21 +84,7 @@ impl<'a> MessageList<'a> {
     }
 
     fn is_action_message(msg: &ChatMessage) -> bool {
-        if msg.role == Role::Tool {
-            return true;
-        }
-        if msg.role == Role::System {
-            let c = msg.content.trim();
-            c.starts_with("✓")
-                || c.starts_with("✗")
-                || c.starts_with("Step")
-                || c.starts_with("Starting build")
-                || c.starts_with("Build")
-                || c.starts_with("Checkpoint")
-                || c.starts_with("Plan")
-        } else {
-            false
-        }
+        msg.role == Role::Tool
     }
 
     fn action_glyph(&self, msg: &ChatMessage) -> &'static str {
@@ -150,8 +135,6 @@ impl<'a> MessageList<'a> {
 
             for (i, content_line) in content_lines.iter().enumerate() {
                 if i == 0 {
-                    let timestamp = msg.timestamp.format("%H:%M").to_string();
-
                     let content_prefix = if is_action {
                         let glyph = self.action_glyph(msg);
                         if content_line.is_empty() {
@@ -163,13 +146,9 @@ impl<'a> MessageList<'a> {
                         format!(" {}", content_line)
                     };
 
-                    let pad = content_width.saturating_sub(content_prefix.len() + timestamp.len() + 1);
-
                     lines.push(Line::from(vec![
                         Span::styled(gutter, Style::default().fg(role_color)),
                         Span::styled(content_prefix, Style::default().fg(self.colors.text)),
-                        Span::styled(" ".repeat(pad), Style::default()),
-                        Span::styled(timestamp, Style::default().fg(self.colors.text_muted)),
                     ]));
                 } else {
                     lines.push(Line::from(vec![
