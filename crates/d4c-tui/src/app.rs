@@ -19,7 +19,7 @@ use d4c_core::plan::{
     build_synthesis_prompt, parse_synthesis, Plan,
     PlanManager,
 };
-use d4c_core::provider::{ChatOptions, EffortLevel, OpenCodeProvider, Provider};
+use d4c_core::provider::{ChatOptions, EffortLevel, OpenCodeProvider, Provider, StreamChunk};
 use d4c_core::router::ModelRouter;
 use crate::event::{poll_event, AppEvent, EventResult};
 use crate::input::InputState;
@@ -61,6 +61,16 @@ pub struct App {
     build_files_touched: Vec<String>,
     build_errors: Vec<String>,
     build_verification: Option<String>,
+    /// Receiver for the active streaming chat response. Set when a chat
+    /// message is sent, drained each event-loop tick, cleared on done.
+    stream_rx: Option<tokio::sync::mpsc::Receiver<StreamChunk>>,
+    /// Accumulated assistant text from `StreamChunk::Delta` events.
+    streaming_text: String,
+    /// Last received status string (`Thinking…`, `Generating response…`).
+    streaming_status_text: String,
+    /// Index into `self.messages` of the placeholder agent message
+    /// that is being updated in-place as the stream progresses.
+    streaming_message_idx: Option<usize>,
 }
 
 fn provider_priority(provider: &str) -> u8 {
@@ -153,8 +163,18 @@ impl App {
                         router.load_default_catalog();
                     }
 
-                    let _ = rt.block_on(p.ensure_session());
-                    (Some(p), true, spawned)
+                    match rt.block_on(p.ensure_session()) {
+                        Ok(sid) => {
+                            tracing::info!("Created OpenCode session: {}", sid);
+                            (Some(p), true, spawned)
+                        }
+                        Err(e) => {
+                            tracing::warn!("Session creation failed: {}", e);
+                            // Don't claim connectivity we don't have
+                            router.load_default_catalog();
+                            (None, false, spawned)
+                        }
+                    }
                 } else {
                     router.load_default_catalog();
                     (None, false, spawned)
@@ -211,6 +231,10 @@ impl App {
             build_files_touched: Vec::new(),
             build_errors: Vec::new(),
             build_verification: None,
+            stream_rx: None,
+            streaming_text: String::new(),
+            streaming_status_text: String::new(),
+            streaming_message_idx: None,
         };
 
         app
@@ -227,7 +251,7 @@ impl App {
         while self.running {
             terminal.draw(|f| self.draw(f))?;
 
-            match poll_event(Duration::from_millis(100))? {
+            match poll_event(Duration::from_millis(50))? {
                 EventResult::Event(AppEvent::KeyInput(key)) => {
                     if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                         match key.code {
@@ -256,6 +280,9 @@ impl App {
                             KeyCode::Esc => {
                                 if self.model_picker {
                                     self.close_model_picker();
+                                } else if self.stream_rx.is_some() {
+                                    // Cancel in-flight generation
+                                    self.cancel_stream();
                                 } else if self.plan_view != PlanView::Hidden {
                                     self.plan_view = PlanView::Hidden;
                                     self.plan_generating = false;
@@ -265,6 +292,9 @@ impl App {
                             KeyCode::Enter => {
                                 if self.model_picker {
                                     self.select_model_picker_model();
+                                } else if self.agent_busy {
+                                    // Streaming in progress — ignore Enter; the user
+                                    // can press Esc to cancel and then retype.
                                 } else {
                                     let input = self.input.submit();
                                     if !input.is_empty() {
@@ -327,6 +357,9 @@ impl App {
                     if self.agent_busy {
                         self.spinner_frame = self.spinner_frame.wrapping_add(1);
                     }
+                    // Drain any new chunks from the LLM stream so the UI
+                    // stays responsive and shows live status / partial text.
+                    self.poll_stream();
                 }
             }
         }
@@ -510,60 +543,199 @@ impl App {
                 self.current_model = decision.selected_model.clone();
                 self.current_provider = decision.selected_provider.clone();
             }
-            self.agent_busy = true;
 
-            let response = match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
+            // Reset streaming state and insert a placeholder agent message
+            // that will be filled in by the event loop as `StreamChunk`s arrive.
+            self.agent_busy = true;
+            self.streaming_text.clear();
+            self.streaming_status_text = "Sending…".into();
+            self.messages
+                .push(ChatMessage::new(Role::Agent, self.streaming_status_text.clone()));
+            self.streaming_message_idx = Some(self.messages.len() - 1);
+
+            let cur_provider = self.current_provider.clone();
+            let cur_model = self.current_model.clone();
+
+            match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
                 Some((provider, rt)) => {
-                    let _ = rt.block_on(provider.ensure_session());
+                    // Ensure session exists — retry once if it fails (cold-start race)
+                    if let Err(e) = rt.block_on(provider.ensure_session()) {
+                        tracing::warn!("Session ensure failed, retrying: {}", e);
+                        provider.reset_session();
+                        if let Err(e2) = rt.block_on(provider.ensure_session()) {
+                            self.finalize_stream(Err(format!(
+                                "[cannot connect to OpenCode session: {}]\n\
+                                 Try /login or restart with `opencode serve`.",
+                                e2
+                            )));
+                            return;
+                        }
+                    }
 
                     let msg = d4c_core::provider::Message {
                         role: "user".into(),
                         content: input.clone(),
                     };
-
                     let options = ChatOptions {
-                        provider_id: Some(self.current_provider.clone()),
-                        model_id: Some(self.current_model.clone()),
+                        provider_id: Some(cur_provider),
+                        model_id: Some(cur_model),
                     };
 
-                    match rt.block_on(provider.chat(&[msg], &[], &options)) {
-                        Ok(resp) => {
-                            if resp.tool_calls.is_empty() {
-                                resp.content
-                            } else {
-                                let mut out = resp.content;
-                                for tc in &resp.tool_calls {
-                                    out.push_str(&format!(
-                                        "\n\n[tool call: {} with {:?}]",
-                                        tc.name, tc.arguments
-                                    ));
-                                }
-                                out
-                            }
+                    match rt.block_on(provider.chat_stream(&[msg], &options)) {
+                        Ok(rx) => {
+                            self.stream_rx = Some(rx);
                         }
                         Err(e) => {
-                            format!("[OpenCode error: {}]", e)
+                            self.finalize_stream(Err(format!(
+                                "[failed to start generation: {}]",
+                                e
+                            )));
                         }
                     }
                 }
                 None => {
-                    format!(
+                    self.finalize_stream(Ok(format!(
                         "[routed to {} ({})]\nReceived: \"{}\"\n\n\
                          No OpenCode server connected. Start it with `opencode serve` \
                          or check your connection.",
                         decision.selected_model,
                         decision.tier,
                         input.chars().take(80).collect::<String>()
-                    )
+                    )));
                 }
-            };
+            }
+        }
+    }
 
-            self.agent_busy = false;
-            self.messages.push(ChatMessage::new(Role::Agent, response));
+    /// Drain any pending `StreamChunk`s from the active stream receiver
+    /// and update the placeholder message in-place. Called from the
+    /// event loop's `Timeout` branch so the UI never blocks on the LLM.
+    fn poll_stream(&mut self) {
+        // Take the receiver out of `self` so we can mutate `self`
+        // (status text, message content, finalize_stream) inside the
+        // drain loop without overlapping the `&mut self.stream_rx`.
+        let mut rx = match self.stream_rx.take() {
+            Some(rx) => rx,
+            None => return,
+        };
+
+        // Drain available chunks without blocking.
+        while let Ok(chunk) = rx.try_recv() {
+            match chunk {
+                StreamChunk::Status(s) => {
+                    self.streaming_status_text = s;
+                    self.update_streaming_message();
+                }
+                StreamChunk::Delta(text) => {
+                    self.streaming_text.push_str(&text);
+                    self.update_streaming_message();
+                }
+                StreamChunk::Done { .. } => {
+                    // Tokens are not surfaced to the UI yet.
+                }
+                StreamChunk::Error(e) => {
+                    // finalize_stream already clears self.stream_rx.
+                    drop(rx);
+                    self.finalize_stream(Err(e));
+                    return;
+                }
+                StreamChunk::Finished => {
+                    let text = if self.streaming_text.is_empty() {
+                        None
+                    } else {
+                        Some(self.streaming_text.clone())
+                    };
+                    drop(rx);
+                    match text {
+                        Some(t) => self.finalize_stream(Ok(t)),
+                        None => self.finalize_stream(Err("No response received".into())),
+                    }
+                    return;
+                }
+            }
+        }
+
+        // Stream still alive — restore for the next poll.
+        self.stream_rx = Some(rx);
+    }
+
+    /// Write `streaming_text` (or the latest status if text has not yet
+    /// started arriving) into the placeholder message so the rendered
+    /// transcript updates in real time.
+    fn update_streaming_message(&mut self) {
+        let display = if self.streaming_text.is_empty() {
+            self.streaming_status_text.clone()
+        } else {
+            self.streaming_text.clone()
+        };
+        if let Some(idx) = self.streaming_message_idx {
+            if let Some(msg) = self.messages.get_mut(idx) {
+                msg.content = display;
+            }
+        }
+    }
+
+    /// Close out the active stream: rewrite the placeholder message with
+    /// the final content (success or error) and reset streaming state.
+    /// `result` carries the assistant text on success or an error
+    /// message on failure.
+    fn finalize_stream(&mut self, result: std::result::Result<String, String>) {
+        let (mut content, is_error) = match result {
+            Ok(c) => (c, false),
+            Err(e) => (e, true),
+        };
+        if is_error && content.is_empty() {
+            content = "[generation failed]".into();
+        }
+
+        if let Some(idx) = self.streaming_message_idx.take() {
+            if let Some(msg) = self.messages.get_mut(idx) {
+                msg.role = if is_error { Role::Error } else { Role::Agent };
+                msg.content = content;
+            }
+        } else {
+            let role = if is_error { Role::Error } else { Role::Agent };
+            self.messages.push(ChatMessage::new(role, content));
+        }
+
+        self.stream_rx = None;
+        self.agent_busy = false;
+        self.streaming_text.clear();
+        self.streaming_status_text.clear();
+    }
+
+    /// Cancel the in-flight generation (Esc during streaming). Sends an
+    /// interrupt to the server, then finalizes the placeholder with a
+    /// "cancelled" notice preserving any partial text already received.
+    fn cancel_stream(&mut self) {
+        let partial = if self.streaming_text.is_empty() {
+            None
+        } else {
+            Some(format!("{}\n\n[generation cancelled]", self.streaming_text))
+        };
+
+        if let Some(ref rt) = self.runtime {
+            if let Some(ref p) = self.provider {
+                let _ = rt.block_on(async { p.interrupt().await });
+            }
+        }
+
+        match partial {
+            Some(text) => self.finalize_stream(Ok(text)),
+            None => self.finalize_stream(Err("Generation cancelled".into())),
         }
     }
 
     fn handle_plan_input(&mut self, input: String) {
+        if self.active_plan.is_none() {
+            self.plan_view = PlanView::Hidden;
+            self.messages.push(ChatMessage::new(
+                Role::Error,
+                "No active plan. Use /plan <task> to create one.",
+            ));
+            return;
+        }
+
         if let Some(ref mut plan) = self.active_plan {
             match self.plan_view {
                 PlanView::Assumptions => {
@@ -690,6 +862,21 @@ impl App {
             model_id: Some(self.current_model.clone()),
         };
 
+        // Ensure session exists before attempting chat (fixes cold-start race)
+        if let Err(e) = rt.block_on(provider.ensure_session()) {
+            tracing::warn!("Session ensure failed before plan gen: {}", e);
+            provider.reset_session();
+            if let Err(e2) = rt.block_on(provider.ensure_session()) {
+                self.plan_generating = false;
+                self.agent_busy = false;
+                self.plan_view = PlanView::Hidden;
+                return self.messages.push(ChatMessage::new(
+                    Role::Error,
+                    format!("[cannot connect to OpenCode session: {}]", e2),
+                ));
+            }
+        }
+
         let result = rt.block_on(provider.chat(&[msg], &[], &options));
         self.plan_generating = false;
         self.agent_busy = false;
@@ -701,10 +888,10 @@ impl App {
                         if assumptions.is_empty() && steps.is_empty() {
                             self.messages.push(ChatMessage::new(
                                 Role::Error,
-                                "Model returned no plan - try 'reject <reason>' to re-synthesize, or Esc to abort."
+                                "Model returned no plan - try '/plan <task>' again, or use a different model."
                                     .to_string(),
                             ));
-                            self.plan_view = PlanView::PlanReview;
+                            self.plan_view = PlanView::Hidden;
                             return;
                         }
                         let mgr = PlanManager::new();
@@ -718,9 +905,9 @@ impl App {
                     Err(e) => {
                         self.messages.push(ChatMessage::new(
                             Role::Error,
-                            format!("Failed to parse plan: {}. Response was: {}", e, resp.content),
+                            format!("Failed to parse plan: {}. Try '/plan <task>' again or use a different model.", e),
                         ));
-                        self.plan_view = PlanView::Assumptions;
+                        self.plan_view = PlanView::Hidden;
                     }
                 }
             }
@@ -729,7 +916,7 @@ impl App {
                     Role::Error,
                     format!("[plan generation error: {}]", e),
                 ));
-                self.plan_view = PlanView::Assumptions;
+                self.plan_view = PlanView::Hidden;
             }
         }
     }
@@ -1386,10 +1573,14 @@ impl App {
             " Filter (Esc to cancel) "
         } else if self.plan_generating {
             " Generating plan (Esc to abort) "
+        } else if self.stream_rx.is_some() {
+            " Streaming response (Esc to cancel) "
         } else if self.plan_view == PlanView::Assumptions {
             " Toggle with number, 'done' to accept (Esc to exit) "
         } else if self.plan_view == PlanView::PlanReview {
             " Type 'approve' or 'reject <reason>' "
+        } else if self.agent_busy {
+            " Working… "
         } else {
             ""
         };
@@ -1490,6 +1681,7 @@ impl App {
         let mut sb = StatusBar::new();
         sb.connected = self.provider.is_some();
         sb.agent_busy = self.agent_busy;
+        sb.streaming_status = self.streaming_status_text.clone();
         sb.spinner_frame = self.spinner_frame;
         sb.model = self.current_model.clone();
         sb.effort = self.effort.to_string();

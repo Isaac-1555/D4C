@@ -18,6 +18,7 @@ pub struct StatusBar {
     pub connected: bool,
     pub agent_busy: bool,
     pub spinner_frame: usize,
+    pub streaming_status: String,
     pub model: String,
     pub effort: String,
     pub version: String,
@@ -30,6 +31,7 @@ impl StatusBar {
             connected: false,
             agent_busy: false,
             spinner_frame: 0,
+            streaming_status: String::new(),
             model: String::new(),
             effort: String::new(),
             version: String::new(),
@@ -70,6 +72,18 @@ impl StatusBar {
             Style::default().fg(dot_color).bg(colors.surface),
         );
 
+        // Optional streaming status text ("Thinking…", "Generating…")
+        // shown next to the spinner while the LLM is working.
+        let status_span = if self.agent_busy && !self.streaming_status.is_empty() {
+            format!(" {} ", self.streaming_status)
+        } else {
+            String::new()
+        };
+        let status_span = Span::styled(
+            status_span,
+            Style::default().fg(colors.accent_system).bg(colors.surface),
+        );
+
         let effort_tag = if !self.effort.is_empty() {
             format!(" [{}]", self.effort)
         } else {
@@ -87,14 +101,16 @@ impl StatusBar {
         );
 
         let dot_w = dot_span.width();
+        let status_w = status_span.width();
         let model_w = model_span.width();
         let version_w = version_span.width();
         let avail = area.width as usize;
 
-        if dot_w + model_w + 1 + version_w <= avail {
-            let pad = avail - dot_w - model_w - version_w;
+        if dot_w + status_w + model_w + 1 + version_w <= avail {
+            let pad = avail.saturating_sub(dot_w + status_w + model_w + version_w);
             let line = Line::from(vec![
                 dot_span,
+                status_span,
                 model_span,
                 Span::styled(" ".repeat(pad), Style::default().bg(colors.bg)),
                 version_span,
@@ -102,7 +118,7 @@ impl StatusBar {
             let paragraph = Paragraph::new(line).bg(colors.bg);
             f.render_widget(paragraph, area);
         } else {
-            let line = Line::from(vec![dot_span, model_span]);
+            let line = Line::from(vec![dot_span, status_span, model_span]);
             let paragraph = Paragraph::new(line).bg(colors.bg);
             f.render_widget(paragraph, area);
         }

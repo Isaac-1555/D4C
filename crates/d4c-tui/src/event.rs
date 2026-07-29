@@ -12,6 +12,8 @@ pub enum EventResult {
     Timeout,
 }
 
+/// Poll duration. 50 ms (down from 100) keeps streamed token arrivals
+/// feeling live without burning measurable CPU.
 pub fn poll_event(timeout: Duration) -> Result<EventResult, anyhow::Error> {
     if event::poll(timeout)? {
         match event::read()? {
