@@ -15,10 +15,10 @@ impl CommandRegistry {
 
         registry.register("help", |args| {
             if args.is_empty() {
-                Ok("Available commands:\n  /help    [cmd]  - Show help (or help for specific command)\n  /new            - Start new session\n  /clear          - Clear conversation context\n  /quit           - Exit d4c\n  /model   [name] - List or pin a model\n  /history        - Browse past sessions\n  /config         - View/edit configuration\n  /login          - Connect to a provider\n  /review         - Review diff, plan, or past output\n  /plan    <task> - Start interactive planning\n  /build          - Execute an approved plan\n\nKeys: Ctrl+E  cycle effort (low/medium/high)".into())
+                Ok("Available commands:\n  /help    [cmd]  - Show help (or help for specific command)\n  /new            - Start new session\n  /clear          - Clear conversation context\n  /quit           - Exit d4c\n  /model   [name] - List or pin a model\n  /history        - Browse past sessions\n  /config         - View/edit configuration\n  /login          - Connect to a provider\n  /review         - Review diff, plan, or past output\n  /plan    <task> - Generate implementation plan\n  /build          - Execute an approved plan\n\nKeys: Ctrl+E  cycle effort (low/medium/high)".into())
             } else {
                 match args {
-                    "plan" => Ok("/plan <task> - Interactive planning workflow.\n  Scans repo, generates questionnaire,\n  surfaces assumptions, produces plan\n  for approval.".into()),
+                    "plan" => Ok("/plan <task> - Generate implementation plan.\n  Scans repo, synthesizes assumptions\n  and steps, produces plan for approval.".into()),
                     "build" => Ok("/build - Execute approved plan with\n  checkpoints. Pauses after each step\n  for review/abort.".into()),
                     _ => Ok(format!("No detailed help for /{}", args)),
                 }
@@ -156,8 +156,7 @@ impl CommandRegistry {
             if args.is_empty() {
                 return Ok("Usage: /plan <task description>\n  Example: /plan Add dark mode toggle to settings".into());
             }
-            // App owns the provider; it scans repo + drives the model itself.
-            Ok(format!("__PLAN_GENERATE_QUESTIONS__{}", args))
+            Ok(format!("__PLAN_GENERATE__{}", args))
         });
 
         registry.register("model", |args| {

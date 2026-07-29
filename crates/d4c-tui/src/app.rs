@@ -14,8 +14,8 @@ use std::time::Duration;
 use d4c_core::commands::CommandRegistry;
 use d4c_core::indexer::RepoIndex;
 use d4c_core::plan::{
-    build_question_prompt, build_synthesis_prompt, parse_questions, parse_synthesis, Plan,
-    PlanManager, Question, QuestionKind,
+    build_synthesis_prompt, parse_synthesis, Plan,
+    PlanManager,
 };
 use d4c_core::provider::{ChatOptions, EffortLevel, OpenCodeProvider, Provider};
 use d4c_core::router::ModelRouter;
@@ -40,10 +40,7 @@ pub struct App {
     plan_view: PlanView,
     building: bool,
     build_step: usize,
-    question_cursor: usize,
-    multi_selected: Vec<usize>,
     plan_generating: bool,
-    plan_synthesizing: bool,
     reject_reason: Option<String>,
     colors: Colors,
     agent_busy: bool,
@@ -78,21 +75,9 @@ fn dummy_index() -> RepoIndex {
     }
 }
 
-/// Number of selectable options for a question. YesNo has 2 (yes/no) even
-/// when its `options` vec is empty; the cursor cycles between them.
-fn option_count(q: &Question) -> usize {
-    match q.kind {
-        QuestionKind::YesNo => 2,
-        _ => q.options.len(),
-    }
-}
-
-const SPINNER_ASCII: &[char] = &['|', '/', '-', '\\', '|', '/', '-', '\\', '|', '/'];
-
 #[derive(PartialEq)]
 enum PlanView {
     Hidden,
-    Questions,
     Assumptions,
     PlanReview,
 }
@@ -200,10 +185,7 @@ impl App {
             plan_view: PlanView::Hidden,
             building: false,
             build_step: 0,
-            question_cursor: 0,
-            multi_selected: Vec::new(),
             plan_generating: false,
-            plan_synthesizing: false,
             reject_reason: None,
             colors: Colors::default(),
             agent_busy: false,
@@ -265,17 +247,12 @@ impl App {
                                 } else if self.plan_view != PlanView::Hidden {
                                     self.plan_view = PlanView::Hidden;
                                     self.plan_generating = false;
-                                    self.plan_synthesizing = false;
                                     self.agent_busy = false;
-                                    self.question_cursor = 0;
-                                    self.multi_selected.clear();
                                 }
                             }
                             KeyCode::Enter => {
                                 if self.model_picker {
                                     self.select_model_picker_model();
-                                } else if self.try_plan_question_key(KeyCode::Enter) {
-                                    // select-kind confirm handled
                                 } else {
                                     let input = self.input.submit();
                                     if !input.is_empty() {
@@ -301,25 +278,15 @@ impl App {
                             {
                             }
                             KeyCode::Char(' ') => {
-                                if self.try_plan_question_key(KeyCode::Char(' ')) {
-                                    // space toggles multi-select
-                                } else {
-                                    self.input.insert_char(' ');
-                                    if self.model_picker {
-                                        self.model_selection = 0;
-                                    }
+                                self.input.insert_char(' ');
+                                if self.model_picker {
+                                    self.model_selection = 0;
                                 }
                             }
                             KeyCode::Char(c) => {
-                                if c.is_ascii_digit()
-                                    && self.try_plan_question_key(KeyCode::Char(c))
-                                {
-                                    // digit pick handled
-                                } else {
-                                    self.input.insert_char(c);
-                                    if self.model_picker {
-                                        self.model_selection = 0;
-                                    }
+                                self.input.insert_char(c);
+                                if self.model_picker {
+                                    self.model_selection = 0;
                                 }
                             }
                             KeyCode::Left => self.input.move_left(),
@@ -327,8 +294,6 @@ impl App {
                             KeyCode::Up => {
                                 if self.model_picker {
                                     self.model_selection = self.model_selection.saturating_sub(1);
-                                } else if self.try_plan_question_key(KeyCode::Up) {
-                                    // cursor moved
                                 } else {
                                     self.input.scroll_up();
                                 }
@@ -337,8 +302,6 @@ impl App {
                                 if self.model_picker {
                                     let max = self.filtered_models().len().saturating_sub(1);
                                     self.model_selection = (self.model_selection + 1).min(max);
-                                } else if self.try_plan_question_key(KeyCode::Down) {
-                                    // cursor moved
                                 } else {
                                     self.input.scroll_down();
                                 }
@@ -423,26 +386,8 @@ impl App {
                             self.building = false;
                             self.plan_view = PlanView::Hidden;
                         }
-                    } else if let Some(task) = output.strip_prefix("__PLAN_GENERATE_QUESTIONS__") {
-                        self.start_plan_generation(task);
-                    } else if output.starts_with("__PLAN_START__") {
-                        // Legacy offline-only path, kept as a fallback for mock plans.
-                        let json = &output["__PLAN_START__".len()..];
-                        match serde_json::from_str::<Plan>(json) {
-                            Ok(plan) => {
-                                self.active_plan = Some(plan);
-                                self.plan_view = PlanView::Questions;
-                                self.question_cursor = 0;
-                                self.multi_selected.clear();
-                                self.reject_reason = None;
-                            }
-                            Err(e) => {
-                                self.messages.push(ChatMessage::new(
-                                    Role::Error,
-                                    format!("Failed to parse plan: {}", e),
-                                ));
-                            }
-                        }
+                    } else if let Some(task) = output.strip_prefix("__PLAN_GENERATE__") {
+                        self.start_plan_direct(task);
                     } else if output == "__NEW_SESSION__" {
                         self.messages.clear();
                         if let Some(ref mut p) = self.provider {
@@ -585,27 +530,6 @@ impl App {
     fn handle_plan_input(&mut self, input: String) {
         if let Some(ref mut plan) = self.active_plan {
             match self.plan_view {
-                PlanView::Questions => {
-                    let current_q_idx = plan.questions.iter().position(|q| q.answer.is_none());
-                    if let Some(idx) = current_q_idx {
-                        let q = &plan.questions[idx];
-                        // FreeText path: input is the answer. Other kinds are answered
-                        // via dedicated keys (handle_plan_key), not this free-text submit.
-                        if q.kind == QuestionKind::FreeText {
-                            self.commit_question_answer(idx, input);
-                        } else if !q.custom {
-                            // Forced-select question with no custom allowed: ignore free-text
-                            // submit, the user must use arrow keys / number keys.
-                            self.messages.push(ChatMessage::new(
-                                Role::Error,
-                                "Use arrows + Enter (or a number key) to pick an option.".to_string(),
-                            ));
-                        } else {
-                            // Select-kind with custom allowed: free text is treated as a custom answer.
-                            self.commit_question_answer(idx, input);
-                        }
-                    }
-                }
                 PlanView::Assumptions => {
                     if input.trim().eq_ignore_ascii_case("done") {
                         plan.assumptions.iter_mut().for_each(|a| a.accepted = true);
@@ -626,14 +550,13 @@ impl App {
                         .strip_prefix("reject")
                         .map(|r| r.trim().to_string())
                     {
-                        // Reject loops back to Questions with the reason fed to synthesis.
-                        plan.status = d4c_core::plan::PlanStatus::Rejected;
+                        plan.status = d4c_core::plan::PlanStatus::Scanning;
                         self.reject_reason = Some(reason);
-                        plan.questions.iter_mut().for_each(|q| q.answer = None);
                         plan.assumptions.iter_mut().for_each(|a| a.accepted = false);
-                        self.question_cursor = 0;
-                        self.multi_selected.clear();
-                        self.plan_view = PlanView::Questions;
+                        plan.steps.clear();
+                        plan.assumptions.clear();
+                        let task = plan.task.clone();
+                        self.start_plan_direct(&task);
                     }
                 }
                 PlanView::Hidden => {}
@@ -641,402 +564,51 @@ impl App {
         }
     }
 
-    /// Commit an answer to the question at `idx`, log it as a User message,
-    /// reset per-question state, advance to next question or kick off synthesis.
-    fn commit_question_answer(&mut self, idx: usize, answer: String) {
-        if let Some(ref mut plan) = self.active_plan {
-            if let Some(q) = plan.questions.get_mut(idx) {
-                let summary = format!("Q{} [{}]: {}", q.id, q.text, answer);
-                q.answer = Some(answer);
-                self.messages.push(ChatMessage::new(Role::User, summary));
-            }
-            self.question_cursor = 0;
-            self.multi_selected.clear();
 
-            let all_done = plan.questions.iter().all(|q| q.answer.is_some());
-            if all_done {
-                self.start_plan_synthesis();
-            }
-        }
-    }
 
-    /// Returns true if the currently-active question is a selectable kind
-    /// (SingleSelect / MultiSelect / YesNo) and we're in the Questions view.
-    fn current_question_is_select(&self) -> bool {
-        if self.plan_view != PlanView::Questions {
-            return false;
-        }
-        let Some(plan) = self.active_plan.as_ref() else {
-            return false;
-        };
-        let Some(q) = plan.questions.iter().find(|q| q.answer.is_none()) else {
-            return false;
-        };
-        matches!(
-            q.kind,
-            QuestionKind::SingleSelect | QuestionKind::MultiSelect | QuestionKind::YesNo
-        )
-    }
-
-    /// Kind of the first unanswered question in the active plan, if any.
-    fn active_plan_question_kind(&self) -> Option<QuestionKind> {
-        self.active_plan
-            .as_ref()
-            .and_then(|p| p.questions.iter().find(|q| q.answer.is_none()))
-            .map(|q| q.kind)
-    }
-
-    /// Index (into plan.questions) of the first unanswered question.
-    fn current_question_idx(&self) -> Option<usize> {
-        self.active_plan
-            .as_ref()
-            .and_then(|p| p.questions.iter().position(|q| q.answer.is_none()))
-    }
-
-    /// Try to handle a key as a plan-question interaction. Returns true if consumed.
-    fn try_plan_question_key(&mut self, code: KeyCode) -> bool {
-        if self.plan_generating || self.plan_synthesizing || self.agent_busy {
-            return false;
-        }
-        if !self.current_question_is_select() {
-            return false;
-        }
-        let Some(idx) = self.current_question_idx() else {
-            return false;
-        };
-
-        // If the question allows custom answers AND the user has already started
-        // typing, fall through except for Enter (which commits the custom text).
-        let custom_active = self
-            .active_plan
-            .as_ref()
-            .and_then(|p| p.questions.get(idx))
-            .map(|q| q.custom)
-            .unwrap_or(false)
-            && !self.input.content.is_empty();
-        if custom_active && !matches!(code, KeyCode::Enter) {
-            return false;
-        }
-
-        match code {
-            KeyCode::Up => {
-                self.question_cursor = self.question_cursor.saturating_sub(1);
-                true
-            }
-            KeyCode::Down => {
-                let max = self
-                    .active_plan
-                    .as_ref()
-                    .and_then(|p| p.questions.get(idx))
-                    .map(|q| option_count(q).saturating_sub(1))
-                    .unwrap_or(0);
-                self.question_cursor = (self.question_cursor + 1).min(max);
-                true
-            }
-            KeyCode::Enter => {
-                if custom_active {
-                    let text = self.input.submit();
-                    self.commit_question_answer(idx, text);
-                } else {
-                    self.confirm_question_cursor(idx);
-                }
-                true
-            }
-            KeyCode::Char(' ') => {
-                self.toggle_multi(idx);
-                true
-            }
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                let n = c.to_digit(10).unwrap() as usize;
-                if n >= 1 {
-                    self.pick_option(idx, n - 1);
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn toggle_multi(&mut self, idx: usize) {
-        let cursor = self.question_cursor;
-        let is_multi = self
-            .active_plan
-            .as_ref()
-            .and_then(|p| p.questions.get(idx))
-            .map(|q| q.kind == QuestionKind::MultiSelect)
-            .unwrap_or(false);
-        if !is_multi {
-            return;
-        }
-        if let Some(pos) = self.multi_selected.iter().position(|&i| i == cursor) {
-            self.multi_selected.remove(pos);
-        } else {
-            self.multi_selected.push(cursor);
-        }
-    }
-
-    fn confirm_question_cursor(&mut self, idx: usize) {
-        let answer = self
-            .active_plan
-            .as_ref()
-            .and_then(|p| p.questions.get(idx))
-            .map(|q| match q.kind {
-                QuestionKind::MultiSelect => {
-                    let mut picked: Vec<String> = Vec::new();
-                    for &i in &self.multi_selected {
-                        if let Some(opt) = q.options.get(i) {
-                            picked.push(opt.clone());
-                        }
-                    }
-                    if picked.is_empty() {
-                        // fall back to cursor
-                        q.options.get(self.question_cursor).cloned().unwrap_or_default()
-                    } else {
-                        picked.join(", ")
-                    }
-                }
-                QuestionKind::YesNo => {
-                    // yes/no: cursor 0 = yes, cursor 1 = no
-                    if self.question_cursor % 2 == 0 {
-                        "yes".to_string()
-                    } else {
-                        "no".to_string()
-                    }
-                }
-                _ => q
-                    .options
-                    .get(self.question_cursor)
-                    .cloned()
-                    .unwrap_or_default(),
-            })
-            .unwrap_or_default();
-
-        if answer.is_empty() {
-            return;
-        }
-        self.commit_question_answer(idx, answer);
-    }
-
-    fn pick_option(&mut self, idx: usize, option_idx: usize) {
-        let is_multi = self
-            .active_plan
-            .as_ref()
-            .and_then(|p| p.questions.get(idx))
-            .map(|q| q.kind == QuestionKind::MultiSelect)
-            .unwrap_or(false);
-        if is_multi {
-            // Number key toggles for multi-select.
-            self.question_cursor = option_idx;
-            self.toggle_multi(idx);
-        } else {
-            self.question_cursor = option_idx;
-            self.confirm_question_cursor(idx);
-        }
-    }
-
-    /// Fire the combined synthesis call (assumptions + steps) using the current
-    /// Q&A (and optional reject reason). On menial result, surface "Nothing to plan".
-    fn start_plan_synthesis(&mut self) {
+    fn start_plan_direct(&mut self, task: &str) {
         let (provider, rt) = match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
             Some((p, rt)) => (p, rt),
             None => {
-                // Offline fallback: keep whatever the mock filled, or default assumptions.
-                if let Some(plan) = self.active_plan.as_mut() {
-                    if plan.assumptions.is_empty() && plan.steps.is_empty() {
-                        plan.assumptions = vec![
-                            d4c_core::plan::Assumption {
-                                id: 1,
-                                statement: "No breaking changes to public API".into(),
-                                accepted: false,
-                                editable: true,
-                            },
-                            d4c_core::plan::Assumption {
-                                id: 2,
-                                statement: "Tests should be updated alongside implementation".into(),
-                                accepted: false,
-                                editable: true,
-                            },
-                        ];
-                        plan.steps = vec![d4c_core::plan::PlanStep {
-                            id: 1,
-                            description: "Implement core change".into(),
-                            files: Vec::new(),
-                            completed: false,
-                        }];
-                    }
-                    plan.status = d4c_core::plan::PlanStatus::Assumptions;
-                }
+                let mgr = PlanManager::new();
+                let mut plan = mgr.create_plan(task);
+                plan.status = d4c_core::plan::PlanStatus::Assumptions;
+                plan.steps = vec![d4c_core::plan::PlanStep {
+                    id: 1,
+                    description: "Implement core change".into(),
+                    files: Vec::new(),
+                    completed: false,
+                }];
+                plan.assumptions = vec![
+                    d4c_core::plan::Assumption {
+                        id: 1,
+                        statement: "No breaking changes to public API".into(),
+                        accepted: false,
+                        editable: true,
+                    },
+                    d4c_core::plan::Assumption {
+                        id: 2,
+                        statement: "Tests should be updated alongside implementation".into(),
+                        accepted: false,
+                        editable: true,
+                    },
+                ];
+                self.active_plan = Some(plan);
                 self.plan_view = PlanView::Assumptions;
                 return;
             }
         };
 
-        self.plan_synthesizing = true;
+        self.plan_generating = true;
         self.agent_busy = true;
 
-        let task = self
-            .active_plan
-            .as_ref()
-            .map(|p| p.task.clone())
-            .unwrap_or_default();
-        let answers: Vec<(Question, String)> = self
-            .active_plan
-            .as_ref()
-            .map(|p| {
-                p.questions
-                    .iter()
-                    .filter_map(|q| q.answer.clone().map(|a| (q.clone(), a)))
-                    .collect()
-            })
-            .unwrap_or_default();
         let reject = self.reject_reason.clone();
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let index = RepoIndex::scan(&cwd).ok();
         let prompt = match &index {
-            Some(idx) => build_synthesis_prompt(&task, idx, &answers, reject.as_deref()),
-            None => build_synthesis_prompt(
-                &task,
-                &dummy_index(),
-                &answers,
-                reject.as_deref(),
-            ),
-        };
-
-        let msg = d4c_core::provider::Message {
-            role: "user".into(),
-            content: prompt,
-        };
-        let options = ChatOptions {
-            provider_id: Some(self.current_provider.clone()),
-            model_id: Some(self.current_model.clone()),
-        };
-
-        let result = rt.block_on(provider.chat(&[msg], &[], &options));
-        self.plan_synthesizing = false;
-        self.agent_busy = false;
-
-        match result {
-            Ok(resp) => {
-                match parse_synthesis(&resp.content) {
-                    Ok((assumptions, steps)) => {
-                        // If synthesis returned nothing, treat as a model
-                        // failure — keep the user's answers so they can
-                        // reject / re-synthesize without retyping.
-                        if assumptions.is_empty() && steps.is_empty() {
-                            self.messages.push(ChatMessage::new(
-                                Role::Error,
-                                "Model returned no plan after your answers - \
-                                 try 'reject <reason>' to re-synthesize, or Esc to abort."
-                                    .to_string(),
-                            ));
-                            self.plan_view = PlanView::PlanReview;
-                            return;
-                        }
-                        if let Some(plan) = self.active_plan.as_mut() {
-                            plan.assumptions = assumptions;
-                            plan.steps = steps;
-                            plan.status = d4c_core::plan::PlanStatus::Assumptions;
-                        }
-                        self.plan_view = PlanView::Assumptions;
-                    }
-                    Err(e) => {
-                        self.messages.push(ChatMessage::new(
-                            Role::Error,
-                            format!("Failed to parse plan: {}. Response was: {}", e, resp.content),
-                        ));
-                        // Fall back to whatever we had.
-                        self.plan_view = PlanView::Assumptions;
-                    }
-                }
-            }
-            Err(e) => {
-                self.messages.push(ChatMessage::new(
-                    Role::Error,
-                    format!("[plan synthesis error: {}]", e),
-                ));
-                self.plan_view = PlanView::Assumptions;
-            }
-        }
-    }
-
-    /// Forward a message to the normal chat path (provider.chat) and display
-    /// the response as an agent message. Used when /plan detects a menial task.
-    fn forward_to_chat(&mut self, input: &str) {
-        self.agent_busy = true;
-
-        let response = match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
-            Some((provider, rt)) => {
-                let _ = rt.block_on(provider.ensure_session());
-
-                let msg = d4c_core::provider::Message {
-                    role: "user".into(),
-                    content: input.to_string(),
-                };
-
-                let options = ChatOptions {
-                    provider_id: Some(self.current_provider.clone()),
-                    model_id: Some(self.current_model.clone()),
-                };
-
-                match rt.block_on(provider.chat(&[msg], &[], &options)) {
-                    Ok(resp) => {
-                        if resp.tool_calls.is_empty() {
-                            resp.content
-                        } else {
-                            let mut out = resp.content;
-                            for tc in &resp.tool_calls {
-                                out.push_str(&format!(
-                                    "\n\n[tool call: {} with {:?}]",
-                                    tc.name, tc.arguments
-                                ));
-                            }
-                            out
-                        }
-                    }
-                    Err(e) => format!("[OpenCode error: {}]", e),
-                }
-            }
-            None => format!("Received: \"{}\" (no provider connected)", input),
-        };
-
-        self.agent_busy = false;
-        self.messages.push(ChatMessage::new(Role::Agent, response));
-    }
-
-    /// Kick off the question-generation phase. Falls back to a mock plan when no
-    /// provider is connected. Menial tasks (0 questions) are forwarded to normal
-    /// chat via forward_to_chat().
-    fn start_plan_generation(&mut self, task: &str) {
-        self.reject_reason = None;
-        self.question_cursor = 0;
-        self.multi_selected.clear();
-
-        let (provider, rt) = match self.provider.as_mut().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
-            Some((p, rt)) => (p, rt),
-            None => {
-                // Offline: use the mock plan to stay usable without a server.
-                let mgr = PlanManager::new();
-                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-                let plan = match RepoIndex::scan(&cwd) {
-                    Ok(index) => mgr.generate_mock_plan(task, &index),
-                    Err(_) => mgr.create_plan(task),
-                };
-                self.active_plan = Some(plan);
-                self.plan_view = PlanView::Questions;
-                return;
-            }
-        };
-
-        // Online: drive the model to produce task-relevant questions.
-        self.plan_generating = true;
-        self.agent_busy = true;
-
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let index = RepoIndex::scan(&cwd).ok();
-        let prompt = match &index {
-            Some(idx) => build_question_prompt(task, idx),
-            None => build_question_prompt(task, &dummy_index()),
+            Some(idx) => build_synthesis_prompt(task, idx, reject.as_deref()),
+            None => build_synthesis_prompt(task, &dummy_index(), reject.as_deref()),
         };
 
         let msg = d4c_core::provider::Message {
@@ -1053,34 +625,41 @@ impl App {
         self.agent_busy = false;
 
         match result {
-            Ok(resp) => match parse_questions(&resp.content) {
-                Ok(questions) => {
-                    if questions.is_empty() {
-                        // Menial task: no planning needed. Forward to normal
-                        // chat so the user gets a direct reply instead of a
-                        // dismissive "Nothing to plan" message.
-                        self.active_plan = None;
-                        self.plan_view = PlanView::Hidden;
-                        self.reject_reason = None;
-                        self.forward_to_chat(&task);
-                    } else {
-                        let plan = Plan::new_questionnaire(&task, questions);
+            Ok(resp) => {
+                match parse_synthesis(&resp.content) {
+                    Ok((assumptions, steps)) => {
+                        if assumptions.is_empty() && steps.is_empty() {
+                            self.messages.push(ChatMessage::new(
+                                Role::Error,
+                                "Model returned no plan - try 'reject <reason>' to re-synthesize, or Esc to abort."
+                                    .to_string(),
+                            ));
+                            self.plan_view = PlanView::PlanReview;
+                            return;
+                        }
+                        let mgr = PlanManager::new();
+                        let mut plan = mgr.create_plan(task);
+                        plan.status = d4c_core::plan::PlanStatus::Assumptions;
+                        plan.steps = steps;
+                        plan.assumptions = assumptions;
                         self.active_plan = Some(plan);
-                        self.plan_view = PlanView::Questions;
+                        self.plan_view = PlanView::Assumptions;
+                    }
+                    Err(e) => {
+                        self.messages.push(ChatMessage::new(
+                            Role::Error,
+                            format!("Failed to parse plan: {}. Response was: {}", e, resp.content),
+                        ));
+                        self.plan_view = PlanView::Assumptions;
                     }
                 }
-                Err(e) => {
-                    self.messages.push(ChatMessage::new(
-                        Role::Error,
-                        format!("Plan failed: could not parse questions: {}. Response: {}", e, resp.content),
-                    ));
-                }
-            },
+            }
             Err(e) => {
                 self.messages.push(ChatMessage::new(
                     Role::Error,
                     format!("[plan generation error: {}]", e),
                 ));
+                self.plan_view = PlanView::Assumptions;
             }
         }
     }
@@ -1417,223 +996,6 @@ impl App {
             let mut lines: Vec<Line> = Vec::new();
 
             match self.plan_view {
-                PlanView::Questions => {
-                    if self.plan_generating {
-                        lines.push(Line::from(Span::styled(
-                            " Generating questions",
-                            Style::default()
-                                .fg(self.colors.accent_system)
-                                .add_modifier(Modifier::BOLD),
-                        )));
-                        lines.push(Line::from(""));
-                        let s = SPINNER_ASCII[self.spinner_frame % SPINNER_ASCII.len()];
-                        lines.push(Line::from(Span::styled(
-                            format!(" {} Reading task and repo...", s),
-                            Style::default().fg(self.colors.accent_user),
-                        )));
-                    } else if self.plan_synthesizing {
-                        // Shown only if we somehow land here; synthesis normally
-                        // commits straight to PlanView::Assumptions.
-                        lines.push(Line::from(Span::styled(
-                            " Synthesizing plan",
-                            Style::default()
-                                .fg(self.colors.accent_system)
-                                .add_modifier(Modifier::BOLD),
-                        )));
-                        let s = SPINNER_ASCII[self.spinner_frame % SPINNER_ASCII.len()];
-                        lines.push(Line::from(Span::styled(
-                            format!(" {} Building assumptions and steps...", s),
-                            Style::default().fg(self.colors.accent_user),
-                        )));
-                    } else {
-                        lines.push(Line::from(Span::styled(
-                            " Questions",
-                            Style::default()
-                                .fg(self.colors.accent_system)
-                                .add_modifier(Modifier::BOLD),
-                        )));
-                        if let Some(reason) = &self.reject_reason {
-                            lines.push(Line::from(""));
-                            lines.push(Line::from(Span::styled(
-                                format!(" Plan rejected: {}", reason),
-                                Style::default().fg(self.colors.accent_error),
-                            )));
-                        }
-                        lines.push(Line::from(""));
-
-                        let current_idx = plan.questions.iter().position(|q| q.answer.is_none());
-                        // First: render answered questions compactly.
-                        for q in plan.questions.iter().filter(|q| q.answer.is_some()) {
-                            let ans = q.answer.clone().unwrap_or_default();
-                            lines.push(Line::from(vec![
-                                Span::styled(
-                                    format!("Q{} ", q.id),
-                                    Style::default().fg(self.colors.accent_user),
-                                ),
-                                Span::styled(
-                                    format!("{} ", q.text),
-                                    Style::default().fg(self.colors.text_muted),
-                                ),
-                                Span::styled(
-                                    format!("-> {}", ans),
-                                    Style::default().fg(self.colors.accent_success),
-                                ),
-                            ]));
-                        }
-
-                        // Then: render the current question prominently.
-                        if let Some(idx) = current_idx {
-                            let q = &plan.questions[idx];
-                            lines.push(Line::from(""));
-                            if !q.header.is_empty() {
-                                lines.push(Line::from(Span::styled(
-                                    format!("[ {} ]", q.header),
-                                    Style::default()
-                                        .fg(self.colors.accent_user)
-                                        .add_modifier(Modifier::BOLD),
-                                )));
-                            }
-                            lines.push(Line::from(Span::styled(
-                                format!("Q{}: {}", q.id, q.text),
-                                Style::default().fg(self.colors.text),
-                            )));
-
-                            match q.kind {
-                                QuestionKind::FreeText => {
-                                    lines.push(Line::from(Span::styled(
-                                        "     type your answer and press Enter",
-                                        Style::default().fg(self.colors.text_muted),
-                                    )));
-                                }
-                                QuestionKind::SingleSelect => {
-                                    for (i, opt) in q.options.iter().enumerate() {
-                                        let cursor_here = i == self.question_cursor;
-                                        let marker = if cursor_here { " > " } else { "   " };
-                                        let key = (b'1' + i as u8)
-                                            .saturating_sub(0) as char;
-                                        let num = if i < 9 {
-                                            format!("{}. ", key)
-                                        } else {
-                                            "   ".to_string()
-                                        };
-                                        let style = if cursor_here {
-                                            Style::default()
-                                                .fg(self.colors.accent_user)
-                                                .add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(self.colors.text)
-                                        };
-                                        let mut spans = vec![Span::styled(
-                                            marker.to_string(),
-                                            Style::default().fg(self.colors.accent_user),
-                                        )];
-                                        spans.push(Span::styled(num, style));
-                                        spans.push(Span::styled(opt.clone(), style));
-                                        if let Some(desc) =
-                                            q.option_descriptions.get(i).filter(|s| !s.is_empty())
-                                        {
-                                            spans.push(Span::styled(
-                                                format!("  - {}", desc),
-                                                Style::default().fg(self.colors.text_muted),
-                                            ));
-                                        }
-                                        lines.push(Line::from(spans));
-                                    }
-                                    lines.push(Line::from(Span::styled(
-                                        "     arrows or 1-9, Enter to pick".to_string(),
-                                        Style::default().fg(self.colors.text_muted),
-                                    )));
-                                }
-                                QuestionKind::MultiSelect => {
-                                    for (i, opt) in q.options.iter().enumerate() {
-                                        let cursor_here = i == self.question_cursor;
-                                        let picked = self.multi_selected.contains(&i);
-                                        let marker = if cursor_here { " > " } else { "   " };
-                                        let check = if picked { "[x]" } else { "[ ]" };
-                                        let style = if cursor_here {
-                                            Style::default()
-                                                .fg(self.colors.accent_user)
-                                                .add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(self.colors.text)
-                                        };
-                                        let num = if i < 9 {
-                                            format!("{}. ", (b'1' + i as u8) as char)
-                                        } else {
-                                            "   ".to_string()
-                                        };
-                                        let mut spans = vec![Span::styled(
-                                            marker.to_string(),
-                                            Style::default().fg(self.colors.accent_user),
-                                        )];
-                                        spans.push(Span::styled(check.to_string(), style));
-                                        spans.push(Span::styled(" ", style));
-                                        spans.push(Span::styled(num, style));
-                                        spans.push(Span::styled(opt.clone(), style));
-                                        if let Some(desc) =
-                                            q.option_descriptions.get(i).filter(|s| !s.is_empty())
-                                        {
-                                            spans.push(Span::styled(
-                                                format!("  - {}", desc),
-                                                Style::default().fg(self.colors.text_muted),
-                                            ));
-                                        }
-                                        lines.push(Line::from(spans));
-                                    }
-                                    lines.push(Line::from(Span::styled(
-                                        "     Space toggles, Enter submits".to_string(),
-                                        Style::default().fg(self.colors.text_muted),
-                                    )));
-                                }
-                                QuestionKind::YesNo => {
-                                    let labels = ["yes", "no"];
-                                    for (i, label) in labels.iter().enumerate() {
-                                        let cursor_here = i == self.question_cursor;
-                                        let marker = if cursor_here { " > " } else { "   " };
-                                        let num = format!("{}. ", (b'1' + i as u8) as char);
-                                        let style = if cursor_here {
-                                            Style::default()
-                                                .fg(self.colors.accent_user)
-                                                .add_modifier(Modifier::BOLD)
-                                        } else {
-                                            Style::default().fg(self.colors.text)
-                                        };
-                                        let mut spans = vec![Span::styled(
-                                            marker.to_string(),
-                                            Style::default().fg(self.colors.accent_user),
-                                        )];
-                                        spans.push(Span::styled(num, style));
-                                        spans.push(Span::styled(label.to_string(), style));
-                                        lines.push(Line::from(spans));
-                                    }
-                                    lines.push(Line::from(Span::styled(
-                                        "     arrows or 1/2, Enter to pick".to_string(),
-                                        Style::default().fg(self.colors.text_muted),
-                                    )));
-                                }
-                            }
-
-                            let remaining = plan
-                                .questions
-                                .iter()
-                                .filter(|q| q.answer.is_none())
-                                .count()
-                                - 1;
-                            if remaining > 0 {
-                                lines.push(Line::from(Span::styled(
-                                    format!("     {} more after this", remaining),
-                                    Style::default().fg(self.colors.text_muted),
-                                )));
-                            }
-                        } else {
-                            // All answered but still in Questions view (shouldn't happen long).
-                            lines.push(Line::from(Span::styled(
-                                "     all questions answered".to_string(),
-                                Style::default().fg(self.colors.text_muted),
-                            )));
-                        }
-                    }
-                }
                 PlanView::Assumptions => {
                     lines.push(Line::from(Span::styled(
                         " Assumptions (toggle with number, 'done' to accept all)",
@@ -1700,17 +1062,7 @@ impl App {
         let title = if self.model_picker {
             " Filter (Esc to cancel) "
         } else if self.plan_generating {
-            " Generating questions (Esc to abort) "
-        } else if self.plan_synthesizing {
-            " Synthesizing plan (Esc to abort) "
-        } else if self.plan_view == PlanView::Questions {
-            match self.active_plan_question_kind() {
-                Some(QuestionKind::FreeText) => " Type your answer - Enter to submit (Esc to exit) ",
-                Some(QuestionKind::SingleSelect) => " Arrows or 1-9 + Enter (Esc to exit) ",
-                Some(QuestionKind::MultiSelect) => " Space toggles, Enter submits (Esc to exit) ",
-                Some(QuestionKind::YesNo) => " Arrows or 1/2 + Enter (Esc to exit) ",
-                None => " Plan Input (Esc to exit) ",
-            }
+            " Generating plan (Esc to abort) "
         } else if self.plan_view == PlanView::Assumptions {
             " Toggle with number, 'done' to accept (Esc to exit) "
         } else if self.plan_view == PlanView::PlanReview {
