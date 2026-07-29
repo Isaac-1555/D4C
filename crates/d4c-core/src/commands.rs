@@ -1,9 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::path::PathBuf;
 
-use crate::indexer::RepoIndex;
-use crate::plan::PlanManager;
 use crate::session::SessionManager;
 
 pub struct CommandRegistry {
@@ -159,13 +156,8 @@ impl CommandRegistry {
             if args.is_empty() {
                 return Ok("Usage: /plan <task description>\n  Example: /plan Add dark mode toggle to settings".into());
             }
-            let mgr = PlanManager::new();
-            let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            let plan = match RepoIndex::scan(&cwd) {
-                Ok(index) => mgr.generate_mock_plan(args, &index),
-                Err(_) => mgr.create_plan(args),
-            };
-            Ok(format!("__PLAN_START__{}", serde_json::to_string(&plan).unwrap_or_default()))
+            // App owns the provider; it scans repo + drives the model itself.
+            Ok(format!("__PLAN_GENERATE_QUESTIONS__{}", args))
         });
 
         registry.register("model", |args| {
