@@ -253,10 +253,11 @@ impl OpenCodeProvider {
         Ok(())
     }
 
-    /// Non-blocking streaming chat. Returns a channel receiver that the
-    /// UI polls on its own cadence. Each `StreamChunk` describes one
-    /// lifecycle event: a status update, an incremental text delta,
-    /// a completion marker, an error, or the terminal `Finished` event.
+    /// Non-blocking streaming chat against the primary session. Returns a
+    /// channel receiver that the UI polls on its own cadence. Each
+    /// `StreamChunk` describes one lifecycle event: a status update, an
+    /// incremental text delta, a completion marker, an error, or the
+    /// terminal `Finished` event.
     pub async fn chat_stream(
         &self,
         messages: &[Message],
@@ -266,7 +267,90 @@ impl OpenCodeProvider {
             .session_id
             .clone()
             .context("No OpenCode session. Call ensure_session first.")?;
+        self.stream_for_session(&session_id, messages, options).await
+    }
 
+    /// One-shot chat in a throwaway session. Creates a fresh session,
+    /// sends a single prompt, drains the stream to completion, and
+    /// returns the final text. The temp session is abandoned (server GC
+    /// reaps it). The primary `session_id` is untouched, so one-shot
+    /// prompts (like /plan synthesis) don't pollute the main chat
+    /// transcript with "return only JSON" instructions.
+    pub async fn chat_one_shot(
+        &self,
+        messages: &[Message],
+        options: &ChatOptions,
+    ) -> Result<ChatResponse> {
+        let temp_sid = self.create_session().await?;
+        let mut rx = self.stream_for_session(&temp_sid, messages, options).await?;
+        let mut full_text = String::new();
+        let mut tokens = TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        };
+        while let Some(chunk) = rx.recv().await {
+            match chunk {
+                StreamChunk::Delta(t) => full_text.push_str(&t),
+                StreamChunk::Done { tokens: tk } => tokens = tk,
+                StreamChunk::Error(e) => anyhow::bail!(e),
+                StreamChunk::Finished => break,
+                StreamChunk::Status(_) => {}
+            }
+        }
+        let content = if full_text.is_empty() {
+            "[no text response from model]".into()
+        } else {
+            full_text
+        };
+        Ok(ChatResponse {
+            content,
+            tool_calls: vec![],
+            usage: tokens,
+        })
+    }
+
+    /// Create a session without storing it on `self`. Used by
+    /// `chat_one_shot()` to isolate one-off prompts from the primary
+    /// chat session.
+    async fn create_session(&self) -> Result<String> {
+        let url = format!("{}/api/session", self.base_url);
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .context("Failed to create temp session")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("temp session create returned {}: {}", status, body);
+        }
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .context("Failed to parse temp session response")?;
+        let sid = data["data"]["id"]
+            .as_str()
+            .or_else(|| data["id"].as_str())
+            .unwrap_or("")
+            .to_string();
+        if sid.is_empty() {
+            anyhow::bail!("temp session returned empty ID");
+        }
+        Ok(sid)
+    }
+
+    /// Core streaming logic parameterized over a session id. Shared by
+    /// `chat_stream()` (primary session) and `chat_one_shot()` (temp
+    /// session). Sends a prompt and spawns a task that parses the SSE
+    /// event stream into `StreamChunk`s.
+    async fn stream_for_session(
+        &self,
+        session_id: &str,
+        messages: &[Message],
+        options: &ChatOptions,
+    ) -> Result<mpsc::Receiver<StreamChunk>> {
         // Pull the last user message — opencode's prompt endpoint takes
         // a single text part (not full conversation history). The server
         // keeps the running transcript on its side.

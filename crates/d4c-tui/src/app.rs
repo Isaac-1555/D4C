@@ -877,7 +877,7 @@ impl App {
             }
         }
 
-        let result = rt.block_on(provider.chat(&[msg], &[], &options));
+        let result = rt.block_on(provider.chat_one_shot(&[msg], &options));
         self.plan_generating = false;
         self.agent_busy = false;
 

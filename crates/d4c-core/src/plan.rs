@@ -316,16 +316,39 @@ pub fn parse_synthesis(content: &str) -> Result<(Vec<Assumption>, Vec<PlanStep>)
 }
 
 fn extract_json_object(content: &str) -> Result<String> {
-    let start = content
-        .find('{')
-        .context("no JSON object found in response")?;
-    let end = content
-        .rfind('}')
-        .context("no closing '}' found in response")?;
-    if end < start {
-        anyhow::bail!("malformed JSON: '}}' before '{{'");
+    // Models often wrap JSON in markdown fences even when told not to.
+    // Strip ```json ... ``` (or plain ``` ... ```) blocks first, then
+    // fall back to bare { ... } extraction so leading prose is tolerated.
+    let trimmed = content.trim();
+
+    // Strip a leading ```json or ``` fence if present.
+    let stripped = if trimmed.starts_with("```") {
+        let after_open = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+            .unwrap_or(trimmed);
+        // Remove trailing fence if present.
+        if let Some(close_idx) = after_open.rfind("```") {
+            &after_open[..close_idx]
+        } else {
+            after_open
+        }
+    } else {
+        trimmed
     }
-    Ok(content[start..=end].to_string())
+    .trim();
+
+    let start = stripped.find('{');
+    let end = stripped.rfind('}');
+
+    match (start, end) {
+        (Some(s), Some(e)) if e >= s => Ok(stripped[s..=e].to_string()),
+        _ => anyhow::bail!(
+            "no JSON object found in response. \
+             The model returned:\n\n{}",
+            content
+        ),
+    }
 }
 
 #[cfg(test)]
