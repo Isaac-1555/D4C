@@ -395,9 +395,17 @@ impl OpenCodeProvider {
         );
         let (tx, rx) = mpsc::channel::<StreamChunk>(64);
         let stream_client = self.stream_client.clone();
+        let history_client = self.client.clone();
+        let history_base = self.base_url.clone();
+        let hist_sid = session_id.to_string();
 
         tokio::spawn(async move {
-            let resp = match stream_client.get(&event_url).send().await {
+            let resp = match stream_client
+                .get(&event_url)
+                .header("Accept", "text/event-stream")
+                .send()
+                .await
+            {
                 Ok(r) => r,
                 Err(e) => {
                     let _ = tx
@@ -410,6 +418,7 @@ impl OpenCodeProvider {
 
             let mut stream = resp.bytes_stream();
             let mut buf = String::new();
+            let mut text_sent = false;
 
             while let Some(chunk_res) = stream.next().await {
                 let chunk = match chunk_res {
@@ -421,9 +430,11 @@ impl OpenCodeProvider {
                         break;
                     }
                 };
-                buf.push_str(&String::from_utf8_lossy(&chunk));
+                // Normalize \r\n → \n so the \n\n delimiter search works
+                // regardless of the server's line-ending convention.
+                buf.push_str(&String::from_utf8_lossy(&chunk).replace("\r\n", "\n"));
 
-                // SSE events are separated by a blank line ("\\n\\n").
+                // SSE events are separated by a blank line ("\n\n").
                 // Each event block may contain one or more `data:` lines
                 // that we concatenate into a single JSON payload.
                 while let Some(idx) = buf.find("\n\n") {
@@ -458,10 +469,26 @@ impl OpenCodeProvider {
                                 .send(StreamChunk::Status("Generating response…".into()))
                                 .await;
                         }
-                        "session.next.text.ended" => {
-                            if let Some(text) = d["text"].as_str() {
+                        // Streaming models send incremental text deltas.
+                        "session.next.text.delta" => {
+                            let delta = d["text"].as_str().or_else(|| d["delta"].as_str());
+                            if let Some(text) = delta {
                                 if !text.is_empty() {
+                                    text_sent = true;
                                     let _ = tx.send(StreamChunk::Delta(text.to_string())).await;
+                                }
+                            }
+                        }
+                        // Non-streaming models deliver the full text in one shot.
+                        "session.next.text.ended" => {
+                            // If we already streamed deltas, don't duplicate
+                            // the full text from text.ended.
+                            if !text_sent {
+                                if let Some(text) = d["text"].as_str() {
+                                    if !text.is_empty() {
+                                        text_sent = true;
+                                        let _ = tx.send(StreamChunk::Delta(text.to_string())).await;
+                                    }
                                 }
                             }
                         }
@@ -472,6 +499,39 @@ impl OpenCodeProvider {
                                 completion_tokens: d["tokens"]["output"].as_u64().unwrap_or(0)
                                     as u32,
                             };
+                            // Safety net: if the SSE stream missed the text.ended
+                            // event entirely (race on first message, network hiccup,
+                            // etc.), fetch the response from the session history
+                            // endpoint so we don't lose the model's output.
+                            if !text_sent {
+                                tracing::warn!("SSE stream ended without any text; fetching history");
+                                let history_url = format!(
+                                    "{}/api/session/{}/history?limit=20",
+                                    history_base, hist_sid
+                                );
+                                if let Ok(resp) = history_client.get(&history_url).send().await {
+                                    if let Ok(data) = resp.json::<serde_json::Value>().await {
+                                        if let Some(events) = data["data"].as_array() {
+                                            for evt in events.iter().rev() {
+                                                if evt["type"].as_str()
+                                                    == Some("session.next.text.ended")
+                                                {
+                                                    if let Some(t) = evt["data"]["text"].as_str() {
+                                                        if !t.is_empty() {
+                                                            let _ = tx
+                                                                .send(StreamChunk::Delta(
+                                                                    t.to_string(),
+                                                                ))
+                                                                .await;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             let _ = tx.send(StreamChunk::Done { tokens }).await;
                             let _ = tx.send(StreamChunk::Finished).await;
                             return;
@@ -489,8 +549,32 @@ impl OpenCodeProvider {
             }
 
             // Stream closed without an explicit `step.ended` (server shutdown,
-            // HTTP timeout, etc.). Signal completion so the consumer stops
-            // polling.
+            // HTTP timeout, etc.). Try the history fallback before giving up.
+            if !text_sent {
+                tracing::warn!("SSE stream closed early without text; fetching history");
+                let history_url = format!(
+                    "{}/api/session/{}/history?limit=20",
+                    history_base, hist_sid
+                );
+                if let Ok(resp) = history_client.get(&history_url).send().await {
+                    if let Ok(data) = resp.json::<serde_json::Value>().await {
+                        if let Some(events) = data["data"].as_array() {
+                            for evt in events.iter().rev() {
+                                if evt["type"].as_str() == Some("session.next.text.ended") {
+                                    if let Some(t) = evt["data"]["text"].as_str() {
+                                        if !t.is_empty() {
+                                            let _ = tx
+                                                .send(StreamChunk::Delta(t.to_string()))
+                                                .await;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             let _ = tx.send(StreamChunk::Finished).await;
         });
 
