@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::indexer::RepoIndex;
 
@@ -55,6 +55,152 @@ impl PlanManager {
             status: PlanStatus::Scanning,
             assumptions: Vec::new(),
         }
+    }
+
+    pub fn save_to_disk(&self, plan: &Plan, plan_path: &Path, todo_path: &Path) -> Result<()> {
+        if let Some(parent) = plan_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        if let Some(parent) = todo_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let plan_json = serde_json::to_string_pretty(plan)?;
+        let plan_md = self.plan_to_markdown(plan);
+        std::fs::write(plan_path, plan_md)?;
+        std::fs::write(
+            plan_path.with_extension("json"),
+            plan_json,
+        )?;
+        self.write_todo(plan, todo_path)?;
+        Ok(())
+    }
+
+    pub fn load_from_disk(plan_path: &Path) -> Result<Plan> {
+        let json_path = plan_path.with_extension("json");
+        if json_path.exists() {
+            let content = std::fs::read_to_string(&json_path)?;
+            let plan: Plan = serde_json::from_str(&content)?;
+            return Ok(plan);
+        }
+        anyhow::bail!("no saved plan found at {}", plan_path.display());
+    }
+
+    pub fn plan_to_markdown(&self, plan: &Plan) -> String {
+        let status_line = match plan.status {
+            PlanStatus::Scanning => "**Status:** Scanning\n",
+            PlanStatus::Assumptions => "**Status:** Assumptions\n",
+            PlanStatus::Draft => "**Status:** Draft\n",
+            PlanStatus::Approved => "**Status:** Approved\n",
+            PlanStatus::InProgress => "**Status:** In Progress\n",
+            PlanStatus::Completed => "**Status:** Completed\n",
+            PlanStatus::Rejected => "**Status:** Rejected\n",
+        };
+
+        let mut md = format!(
+            "# Plan: {}\n\n**ID:** `{}`\n{}\n\n## Task\n\n{}\n\n",
+            plan.task, plan.id, status_line, plan.task,
+        );
+
+        if !plan.assumptions.is_empty() {
+            md.push_str("## Assumptions\n\n");
+            for a in &plan.assumptions {
+                let status = if a.accepted { "✅" } else { "❌" };
+                md.push_str(&format!("- {} {}: {}\n", status, a.id, a.statement));
+            }
+            md.push('\n');
+        }
+
+        md.push_str("## Steps\n\n");
+        for step in &plan.steps {
+            let done = if step.completed { "[x]" } else { "[ ]" };
+            md.push_str(&format!(
+                "{} **Step {}:** {}\n",
+                done, step.id, step.description,
+            ));
+            if !step.files.is_empty() {
+                let files: Vec<String> = step
+                    .files
+                    .iter()
+                    .map(|f| f.to_string_lossy().to_string())
+                    .collect();
+                md.push_str(&format!("   Files: {}\n", files.join(", ")));
+            }
+        }
+
+        md
+    }
+
+    pub fn write_todo(&self, plan: &Plan, todo_path: &Path) -> Result<()> {
+        if let Some(parent) = todo_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let mut content = format!("# TODO: {}\n\n", plan.task);
+        for step in &plan.steps {
+            let marker = if step.completed { "x" } else { " " };
+            content.push_str(&format!("- [{}] Step {} — {}\n", marker, step.id, step.description));
+        }
+
+        std::fs::write(todo_path, content)?;
+        Ok(())
+    }
+
+    pub fn update_todo_status(todo_path: &Path, step_id: usize, new_marker: &str) -> Result<()> {
+        if !todo_path.exists() {
+            anyhow::bail!("todo file not found at {}", todo_path.display());
+        }
+        let content = std::fs::read_to_string(todo_path)?;
+        let marker_pattern = format!("Step {}", step_id);
+        let mut updated = String::new();
+        for line in content.lines() {
+            if line.contains(&marker_pattern) && line.trim_start().starts_with("- [") {
+                let new_line = if line.contains("- [~]") || line.contains("- [ ]") || line.contains("- [x]") {
+                    let before = &line[..line.find("- [").unwrap() + 3];
+                    let after = &line[line.find(']').unwrap() + 1..];
+                    format!("{}{}{}", before, new_marker, after)
+                } else {
+                    line.to_string()
+                };
+                updated.push_str(&new_line);
+                updated.push('\n');
+            } else {
+                updated.push_str(line);
+                updated.push('\n');
+            }
+        }
+        std::fs::write(todo_path, updated)?;
+        Ok(())
+    }
+
+    pub fn mark_todo_in_progress(todo_path: &Path, step_id: usize) -> Result<()> {
+        Self::update_todo_status(todo_path, step_id, "~")
+    }
+
+    pub fn mark_todo_done(todo_path: &Path, step_id: usize) -> Result<()> {
+        Self::update_todo_status(todo_path, step_id, "x")
+    }
+
+    pub fn read_todo_plan_summary(todo_path: &Path) -> Result<String> {
+        if !todo_path.exists() {
+            return Ok(String::new());
+        }
+        let content = std::fs::read_to_string(todo_path)?;
+        let mut summary = String::new();
+        let mut total = 0;
+        let mut done = 0;
+        for line in content.lines() {
+            if line.contains("- [") && line.contains("—") {
+                total += 1;
+                if line.contains("- [x]") {
+                    done += 1;
+                } else if line.contains("- [~]") {
+                    summary.push_str(&format!("  IN PROGRESS: {}\n", line.trim()));
+                }
+            }
+        }
+        summary = format!("{}/{} steps completed\n{}", done, total, summary);
+        Ok(summary)
     }
 }
 

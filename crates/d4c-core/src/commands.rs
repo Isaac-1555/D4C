@@ -170,7 +170,9 @@ impl CommandRegistry {
                 match args.trim() {
                     "continue" | "next" => Ok("__BUILD_NEXT__".into()),
                     "abort" | "pause" => Ok("__BUILD_ABORT__".into()),
-                    _ => Ok("Usage: /build [continue|abort]\n  No args: start build from approved plan\n  continue: proceed to next checkpoint\n  abort: pause execution".into()),
+                    "resume" => Ok("__BUILD_RESUME__".into()),
+                    "status" => Ok("__BUILD_STATUS__".into()),
+                    _ => Ok("Usage: /build [continue|abort|resume|status]\n  No args: start build from approved plan\n  continue: proceed to next checkpoint\n  abort: pause execution\n  resume: resume interrupted build from todo\n  status: show build progress".into()),
                 }
             }
         });

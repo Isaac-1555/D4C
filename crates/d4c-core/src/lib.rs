@@ -1,3 +1,5 @@
+pub mod agent;
+pub mod build;
 pub mod config;
 pub mod indexer;
 pub mod provider;

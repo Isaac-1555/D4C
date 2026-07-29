@@ -11,6 +11,8 @@ use ratatui::{
 use std::io;
 use std::time::Duration;
 
+use d4c_core::agent::AgentConfig;
+use d4c_core::build::{BuildContext, BuildEngine};
 use d4c_core::commands::CommandRegistry;
 use d4c_core::indexer::RepoIndex;
 use d4c_core::plan::{
@@ -54,6 +56,11 @@ pub struct App {
     model_selection: usize,
     config_manager: Option<d4c_core::config::ConfigManager>,
     last_used_model: Option<String>,
+    agent_config: Option<AgentConfig>,
+    build_engine: BuildEngine,
+    build_files_touched: Vec<String>,
+    build_errors: Vec<String>,
+    build_verification: Option<String>,
 }
 
 fn provider_priority(provider: &str) -> u8 {
@@ -199,6 +206,11 @@ impl App {
             model_selection: 0,
             config_manager: saved_config,
             last_used_model: saved_last_used,
+            agent_config: d4c_core::agent::AgentConfig::load().ok(),
+            build_engine: BuildEngine::new(),
+            build_files_touched: Vec::new(),
+            build_errors: Vec::new(),
+            build_verification: None,
         };
 
         app
@@ -352,23 +364,39 @@ impl App {
                         return;
                     }
                     if output == "__BUILD_CHECK__" {
-                        match &self.active_plan {
+                        let plan_source = match &self.active_plan {
                             Some(plan) if plan.status == d4c_core::plan::PlanStatus::Approved => {
+                                Some(plan.clone())
+                            }
+                            _ => {
+                                if let Some(ref ac) = self.agent_config {
+                                    let plan_path = ac.plan_file_path();
+                                    match PlanManager::load_from_disk(&plan_path) {
+                                        Ok(disk_plan) if disk_plan.status == d4c_core::plan::PlanStatus::Approved => {
+                                            self.active_plan = Some(disk_plan.clone());
+                                            Some(disk_plan)
+                                        }
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                }
+                            }
+                        };
+                        match plan_source {
+                            Some(_) => {
                                 self.building = true;
                                 self.build_step = 0;
+                                self.build_files_touched.clear();
+                                self.build_errors.clear();
+                                self.build_verification = None;
                                 self.plan_view = PlanView::PlanReview;
                                 self.execute_build_step();
-                            }
-                            Some(_) => {
-                                self.messages.push(ChatMessage::new(
-                                    Role::Error,
-                                    "Plan not approved yet. Use /plan first, then approve it.",
-                                ));
                             }
                             None => {
                                 self.messages.push(ChatMessage::new(
                                     Role::Error,
-                                    "No plan to build. Use /plan <task> to create one.",
+                                    "No approved plan found. Use /plan <task> to create and approve one.",
                                 ));
                             }
                         }
@@ -385,7 +413,15 @@ impl App {
                         if self.building {
                             self.building = false;
                             self.plan_view = PlanView::Hidden;
+                            self.messages.push(ChatMessage::new(
+                                Role::Tool,
+                                "Build paused. Run `/build resume` to continue.",
+                            ));
                         }
+                    } else if output == "__BUILD_RESUME__" {
+                        self.try_resume_build();
+                    } else if output == "__BUILD_STATUS__" {
+                        self.show_todo_status();
                     } else if let Some(task) = output.strip_prefix("__PLAN_GENERATE__") {
                         self.start_plan_direct(task);
                     } else if output == "__NEW_SESSION__" {
@@ -545,6 +581,26 @@ impl App {
                     if input.trim().eq_ignore_ascii_case("approve") {
                         plan.status = d4c_core::plan::PlanStatus::Approved;
                         self.plan_view = PlanView::Hidden;
+                        if let Some(ref agent_cfg) = self.agent_config {
+                            let mgr = PlanManager::new();
+                            let plan_path = agent_cfg.plan_file_path();
+                            let todo_path = agent_cfg.todo_file_path();
+                            if let Err(e) = mgr.save_to_disk(plan, &plan_path, &todo_path) {
+                                self.messages.push(ChatMessage::new(
+                                    Role::Error,
+                                    format!("Failed to save plan: {}", e),
+                                ));
+                            } else {
+                                let step_count = plan.steps.len();
+                                self.messages.push(ChatMessage::new(
+                                    Role::Tool,
+                                    format!(
+                                        "Plan approved. {} step(s). Run `/build` to start execution.",
+                                        step_count,
+                                    ),
+                                ));
+                            }
+                        }
                     } else if let Some(reason) = input
                         .trim()
                         .strip_prefix("reject")
@@ -606,14 +662,28 @@ impl App {
 
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let index = RepoIndex::scan(&cwd).ok();
-        let prompt = match &index {
+        let base_prompt = match &index {
             Some(idx) => build_synthesis_prompt(task, idx, reject.as_deref()),
             None => build_synthesis_prompt(task, &dummy_index(), reject.as_deref()),
         };
 
+        let plan_system = self
+            .agent_config
+            .as_ref()
+            .map(|ac| ac.plan_prompt.clone())
+            .filter(|s| !s.is_empty());
+
+        let final_prompt = match &plan_system {
+            Some(sys) => format!(
+                "[SYSTEM INSTRUCTIONS]\n{}\n\nNow generate a plan following those instructions.\n\n{}",
+                sys, base_prompt
+            ),
+            None => base_prompt,
+        };
+
         let msg = d4c_core::provider::Message {
             role: "user".into(),
-            content: prompt,
+            content: final_prompt,
         };
         let options = ChatOptions {
             provider_id: Some(self.current_provider.clone()),
@@ -665,29 +735,282 @@ impl App {
     }
 
     fn execute_build_step(&mut self) {
-        if let Some(ref mut plan) = self.active_plan {
-            if self.build_step < plan.steps.len() {
-                let total = plan.steps.len();
-                let description = plan.steps[self.build_step].description.clone();
-                plan.steps[self.build_step].completed = true;
+        let (provider, rt) = match self.provider.as_ref().and_then(|p| self.runtime.as_ref().map(|rt| (p, rt))) {
+            Some((p, rt)) => (p, rt),
+            None => {
                 self.messages.push(ChatMessage::new(
-                    Role::Tool,
-                    format!(
-                        "Step {}/{}: {} [DONE]",
-                        self.build_step + 1,
-                        total,
-                        description
-                    ),
+                    Role::Error,
+                    "No provider connected. Cannot execute build steps.",
                 ));
-                self.build_step += 1;
+                return;
+            }
+        };
 
-                if self.build_step >= plan.steps.len() {
-                    self.building = false;
-                    plan.status = d4c_core::plan::PlanStatus::Completed;
-                    self.plan_view = PlanView::Hidden;
-                } else {
+        if let Some(ref mut plan) = self.active_plan {
+            if self.build_step >= plan.steps.len() {
+                return;
+            }
+
+            let step = plan.steps[self.build_step].clone();
+            let total = plan.steps.len();
+            let step_idx = self.build_step;
+
+            // Mark in-progress in todo
+            if let Some(ref ac) = self.agent_config {
+                let _ = PlanManager::mark_todo_in_progress(&ac.todo_file_path(), step.id);
+            }
+
+            // Build context from previous step output
+            let previous_output: Vec<String> = self
+                .messages
+                .iter()
+                .filter(|m| m.role == Role::Tool && m.content.contains("Step "))
+                .map(|m| m.content.clone())
+                .collect();
+
+            let build_ctx = BuildContext {
+                plan_task: plan.task.clone(),
+                step_index: step_idx,
+                total_steps: total,
+                previous_output,
+            };
+
+            let system_prompt = self
+                .agent_config
+                .as_ref()
+                .map(|ac| ac.build_prompt.clone())
+                .unwrap_or_default();
+
+            let todo_path = self
+                .agent_config
+                .as_ref()
+                .map(|ac| ac.todo_file_path())
+                .unwrap_or_else(|| std::path::PathBuf::from(".agent/todo.md"));
+
+            self.agent_busy = true;
+
+            let result = rt.block_on(self.build_engine.execute_step(
+                provider,
+                plan,
+                &step,
+                &build_ctx,
+                &system_prompt,
+                &todo_path,
+            ));
+
+            self.agent_busy = false;
+
+            // Track results
+            for f in &result.files_touched {
+                if !self.build_files_touched.contains(f) {
+                    self.build_files_touched.push(f.clone());
                 }
             }
+            for e in &result.errors {
+                if !self.build_errors.contains(e) {
+                    self.build_errors.push(e.clone());
+                }
+            }
+
+            // Show result
+            let status_icon = if result.success { "✓" } else { "✗" };
+            let mut msg = format!("{} Step {}/{}: {}", status_icon, step_idx + 1, total, step.description);
+            if !result.output.is_empty() {
+                let preview: String = result.output.chars().take(200).collect();
+                msg.push_str(&format!("\n{}", preview));
+                if result.output.len() > 200 {
+                    msg.push_str("…");
+                }
+            }
+            if !result.errors.is_empty() {
+                for e in &result.errors {
+                    msg.push_str(&format!("\n  Error: {}", e));
+                }
+            }
+            self.messages.push(ChatMessage::new(Role::Tool, msg));
+
+            plan.steps[step_idx].completed = result.success;
+            self.build_step += 1;
+
+            if self.build_step >= plan.steps.len() || !result.success {
+                self.building = false;
+                plan.status = if result.success {
+                    d4c_core::plan::PlanStatus::Completed
+                } else {
+                    d4c_core::plan::PlanStatus::InProgress
+                };
+                self.plan_view = PlanView::Hidden;
+
+                // Run verification
+                self.run_build_verification();
+            }
+        }
+    }
+
+    fn run_build_verification(&mut self) {
+        self.agent_busy = true;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+
+        let cmd = if cwd.join("Cargo.toml").exists() {
+            Some(("cargo check", "cargo check"))
+        } else if cwd.join("package.json").exists() {
+            Some(("npm run build", "npm run build 2>&1 || npm run typecheck 2>&1 || true"))
+        } else if cwd.join("pyproject.toml").exists() || cwd.join("setup.py").exists() {
+            Some(("python -m pytest", "python -m pytest --no-header -q 2>&1 || true"))
+        } else {
+            None
+        };
+
+        let result = match cmd {
+            Some((label, actual_cmd)) => {
+                self.messages.push(ChatMessage::new(
+                    Role::Tool,
+                    format!("Running verification: {} …", label),
+                ));
+                let output = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(actual_cmd)
+                    .output();
+                match output {
+                    Ok(out) => {
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                        let success = out.status.success();
+                        let detail = if !stdout.is_empty() { stdout } else { stderr };
+                        let detail_trimmed: String = detail.chars().take(500).collect();
+                        let status = if success { "passed" } else { "failed" };
+                        let full = format!("Verification ({}) {}\n{}", label, status, detail_trimmed);
+                        self.build_verification = Some(full.clone());
+                        full
+                    }
+                    Err(e) => {
+                        let err = format!("Verification command failed: {}", e);
+                        self.build_verification = Some(err.clone());
+                        err
+                    }
+                }
+            }
+            None => {
+                let msg: String = "No verification command found for this project type.".into();
+                self.build_verification = Some(msg.clone());
+                msg
+            }
+        };
+
+        self.agent_busy = false;
+        self.messages.push(ChatMessage::new(Role::Tool, result));
+
+        // Show build report
+        self.show_build_report();
+    }
+
+    fn show_build_report(&mut self) {
+        let total_steps = self
+            .active_plan
+            .as_ref()
+            .map(|p| p.steps.len())
+            .unwrap_or(0);
+        let files = if self.build_files_touched.is_empty() {
+            "None".into()
+        } else {
+            self.build_files_touched.join("\n  ")
+        };
+        let errors = if self.build_errors.is_empty() {
+            "None".into()
+        } else {
+            self.build_errors.join("\n  ")
+        };
+        let verification = self.build_verification.as_deref().unwrap_or("Not run").to_string();
+
+        let report = format!(
+            "Build complete.\n\n\
+             **Summary:** Finished {} step(s)\n\n\
+             **Files touched:**\n  {}\n\n\
+             **Errors:**\n  {}\n\n\
+             **Verification:** {}\n\n\
+             Run `/build` to continue or start a new plan with `/plan`.",
+            total_steps,
+            files,
+            errors,
+            verification,
+        );
+
+        self.messages.push(ChatMessage::new(Role::Tool, report));
+    }
+
+    fn try_resume_build(&mut self) {
+        if let Some(ref ac) = self.agent_config {
+            let plan_path = ac.plan_file_path();
+            let todo_path = ac.todo_file_path();
+
+            match PlanManager::load_from_disk(&plan_path) {
+                Ok(plan) => {
+                    let todo_summary = PlanManager::read_todo_plan_summary(&todo_path).unwrap_or_default();
+                    let resume_from = plan
+                        .steps
+                        .iter()
+                        .position(|s| !s.completed)
+                        .unwrap_or(0);
+
+                    self.active_plan = Some(plan);
+                    self.building = true;
+                    self.build_step = resume_from;
+                    self.build_files_touched.clear();
+                    self.build_errors.clear();
+                    self.build_verification = None;
+                    self.plan_view = PlanView::PlanReview;
+
+                    self.messages.push(ChatMessage::new(
+                        Role::Tool,
+                        format!("Resuming build from step {}.\n{}", resume_from + 1, todo_summary),
+                    ));
+
+                    self.execute_build_step();
+                }
+                Err(e) => {
+                    self.messages.push(ChatMessage::new(
+                        Role::Error,
+                        format!("Cannot resume: {}", e),
+                    ));
+                }
+            }
+        } else {
+            self.messages.push(ChatMessage::new(
+                Role::Error,
+                "No agent configuration found. Cannot resume build.",
+            ));
+        }
+    }
+
+    fn show_todo_status(&mut self) {
+        if let Some(ref ac) = self.agent_config {
+            let todo_path = ac.todo_file_path();
+            match PlanManager::read_todo_plan_summary(&todo_path) {
+                Ok(summary) => {
+                    if summary.is_empty() {
+                        self.messages.push(ChatMessage::new(
+                            Role::Tool,
+                            "No active build in progress.",
+                        ));
+                    } else {
+                        self.messages.push(ChatMessage::new(
+                            Role::Tool,
+                            format!("Build status:\n{}", summary),
+                        ));
+                    }
+                }
+                Err(e) => {
+                    self.messages.push(ChatMessage::new(
+                        Role::Error,
+                        format!("Failed to read build status: {}", e),
+                    ));
+                }
+            }
+        } else {
+            self.messages.push(ChatMessage::new(
+                Role::Tool,
+                "No agent config. Use /plan <task> to start.",
+            ));
         }
     }
 
